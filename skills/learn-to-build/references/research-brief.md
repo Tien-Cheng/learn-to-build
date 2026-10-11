@@ -6,6 +6,8 @@ You are researching X so that a tutor can write Primers, black-box tests and Des
 
 Use primary sources: official documentation, specifications and RFCs, the real X's source code (cite a file at a commit or tag), and the authors' own design writing. Put a link on every claim. Where only a secondary source exists, say so next to the claim.
 
+Download anything you need to run (an oracle, source to grep) into a fresh temporary directory (`mktemp -d`), and delete it before you report; the oracle's commands in `overview.md` say how to fetch it again. Write only the files you were given, and only in the output directory.
+
 ## Examples
 
 Take every exact example (input and expected output) from a source or from running the oracle. Where neither gives one, state the rule precisely, with a small example you can follow by hand. Checking expected values at scale is done later, Stage by Stage, by the Reference solution against the oracle; your job ends at naming the oracle, so spend your time on sources rather than on writing an implementation of X.

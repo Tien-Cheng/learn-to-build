@@ -24,4 +24,15 @@ Why `new` felt slow, measured from the researcher subagent transcripts of three 
 - Three researchers (spec, history, architecture) run in parallel in the background. The Diagnostic and Harness setup proceed meanwhile; the domain questions wait for `overview.md`, the plan for `spec.md` and `history.md`, the final commit for `architecture.md`.
 - Per-file length limits.
 
-Expected: about 8–10 minutes for an X like the CPU scheduler and 5–7 for Redis or SQLite, much of it overlapped with the Learner answering questions. To be confirmed by timing the next runs.
+## Result
+
+Re-run on the same X (CPU scheduler in C, headless, self-rated Dials):
+
+| | Before | After |
+|---|---|---|
+| Critical-path researcher (overview + spec) | 28.7 min | 7.5 min |
+| History and architecture researchers | (serial, inside the above) | ~4 min each, in parallel |
+| Size of the four files | 84k chars | 53k chars |
+| Whole `new`, through Stage 01 sealed and committed | (research alone was 28.7) | 14.4 min |
+
+The researcher built no simulator: it pinned the OSTEP simulators as the oracle and took its exact examples from running them. Harness setup ran during research. One side effect, fixed in the brief: the oracle clone landed beside the Project instead of in a temp directory.
