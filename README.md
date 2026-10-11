@@ -16,9 +16,9 @@ It exists because AI-assisted work can quietly stop you learning. In a 2026 rand
 6. **`next`** adjusts the difficulty from the evidence (hints, review findings, time to green), schedules a Drill for the concept you just built, and releases the next Stage. Pressure Stages bring the real requirement changes X went through, so poor structure hurts. After the Core path, a **Retrospective** compares your architecture with the real X.
 7. **`drill`**: spaced, 15-minute rebuilds from memory. Your own files for a concept are removed on a throwaway branch and you restore them until that Stage's tests pass. Due means ready, never owed.
 
-**Assistance modes** let you choose how much code the agent writes, per Project or per Stage: **Solo** (none; rebuild unassisted coding), **Pair** (boilerplate around each Stage's concept, which you then walk through), or **Lead** (you write an Approach, the agent implements it, you walk through and debug it; practises AI-assisted development). In every mode, debugging, Drills, Concept checks and reviews stay yours.
+**Assistance modes** let you choose how much code the agent writes, per Project or per Stage: **Solo** (none; rebuild unassisted coding), **Pair** (boilerplate around each Stage's concept, which you then walk through), or **Lead** (you write an Approach, the agent implements it, you walk through and debug it, then hunt a planted bug in a proposed patch; practises AI-assisted development). In every mode, debugging, Drills, Concept checks and reviews stay yours.
 
-The Project's `AGENTS.md` tells any coding agent what your mode lets it write. In Claude Code and Codex, an optional hook also blocks file edits your mode doesn't allow (Codex asks you to trust it once in `/hooks`).
+The Project's `AGENTS.md` tells any coding agent what your mode lets it write. In Claude Code and Codex, an optional hook also blocks file edits (and common shell writes) your mode doesn't allow (Codex asks you to trust it once in `/hooks`).
 
 Design notes, decisions and the research behind them: [docs/design.md](docs/design.md).
 

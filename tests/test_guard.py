@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -65,15 +66,34 @@ def test_codex_apply_patch_paths(tmp_path):
     assert call(project, harness_only)[0] == 0
 
 
-def test_hook_command_finds_guard_from_subdirectory(tmp_path):
+def hook_command(rel):
+    return json.loads((GUARD.parent / rel).read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+
+
+def test_claude_hook_uses_project_dir_and_tolerates_missing_guard(tmp_path):
     project = install(tmp_path)
+    payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "main.py"}, "cwd": str(project)})
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=str(project))
+    proc = subprocess.run(["sh", "-c", hook_command("claude-code/settings.json")], cwd=str(project), input=payload,
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 2
+    env["CLAUDE_PROJECT_DIR"] = str(tmp_path)
+    proc = subprocess.run(["sh", "-c", hook_command("claude-code/settings.json")], cwd=str(tmp_path), input=payload,
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0
+
+
+def test_codex_hook_uses_git_root_and_project_path(tmp_path):
+    project = install(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
     (project / "src").mkdir()
-    command = json.loads((GUARD.parent / "codex" / "hooks.json").read_text())["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    command = hook_command("codex/hooks.json").replace("{PROJECT_PATH}", "proj/")
     payload = json.dumps({"tool_name": "Write", "tool_input": {"file_path": "main.py"}, "cwd": str(project / "src")})
     proc = subprocess.run(["sh", "-c", command], cwd=str(project / "src"), input=payload, capture_output=True, text=True)
     assert proc.returncode == 2
-    outside = subprocess.run(["sh", "-c", command], cwd=str(tmp_path), input=payload, capture_output=True, text=True)
-    assert outside.returncode == 0
+    missing = command.replace("proj/", "nowhere/")
+    proc = subprocess.run(["sh", "-c", missing], cwd=str(project), input=payload, capture_output=True, text=True)
+    assert proc.returncode == 0
 
 
 def test_pair_mode_allows_named_paths_only(tmp_path):
@@ -98,3 +118,49 @@ def test_drill_blocks_every_mode(tmp_path):
     (project / ".ltb" / "drill-active.json").write_text("{}")
     code, err = guard(project, "Write", project / "main.py")
     assert code == 2 and "Drill" in err
+
+
+def bash(project, command, cwd=None):
+    return call(project, {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd or project)})
+
+
+def test_bash_writes_to_solution_code_are_blocked(tmp_path):
+    project = install(tmp_path)
+    for command in (
+        "cat > main.py <<'EOF'\nprint(1)\nEOF",
+        "echo x >> src/lib.py",
+        "printf 'a' | tee main.py",
+        "sed -i '' 's/a/b/' main.py",
+        "cp /tmp/solution.py main.py",
+        "mv main.py old.py",
+        "rm -f main.py",
+        "cd src && echo x > lib.py",
+        "git checkout -- main.py",
+        "git reset --hard",
+        "python3 -c 'print(1)' > out.txt",
+    ):
+        code, err = bash(project, command)
+        assert code == 2, command
+
+
+def test_bash_reads_and_harness_writes_are_allowed(tmp_path):
+    project = install(tmp_path)
+    for command in (
+        "./ltb test",
+        "cat main.py | grep def",
+        "python3 main.py 2>&1 | head",
+        "./ltb test > /tmp/out.txt 2>/dev/null",
+        "echo note >> .ltb/log/notes.md",
+        "git status && git log --oneline",
+        "git add -- ltb .ltb tests && git commit -m 'ltb: x'",
+        "sed -n '1,5p' main.py",
+        "ls >&2",
+    ):
+        code, err = bash(project, command)
+        assert code == 0, (command, err)
+
+
+def test_bash_respects_lead_mode(tmp_path):
+    project = install(tmp_path, "[assist]\ndefault = lead\n")
+    (project / ".ltb" / "stages" / "01-x" / "approach.md").write_text("plan")
+    assert bash(project, "cat > main.py <<'EOF'\nx\nEOF")[0] == 0

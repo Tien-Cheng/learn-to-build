@@ -21,7 +21,7 @@ You have the plan row from the calling step. Its number **NN** is the next unuse
 
 The Stage author writes the Hidden tests and Concept-check answers; you see them only as descriptions, which keeps your hints honest.
 
-**Done when** `.ltb/staging/NN-slug/` contains at least `primer.md`, `public.py`, `hidden.py` and `check.src.json`, and the report lists any earlier test files it changed.
+**Done when** `.ltb/staging/NN-slug/` contains at least `primer.md`, `public.py`, `hidden.py` and `check.src.json` (plus `skeleton.md` when the design Dial is 2 or lower, and `unit/` with `unit.json` when that Skeleton names a pure boundary), and the report lists any earlier test files it changed.
 
 ## 3. The new tests fail on the current code
 

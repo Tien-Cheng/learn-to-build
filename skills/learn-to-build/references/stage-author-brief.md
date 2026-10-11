@@ -50,7 +50,11 @@ One to three quick prediction questions on this Stage's concept, each answerable
 
 ## `skeleton.md` (only when the design Dial is 2 or lower)
 
-A suggested structure for the code so far: the modules or files, each with a one-line responsibility, and what passes between them. Words only: no code and no signatures. Shrink it as Stages go on; the Learner is free to diverge.
+A suggested structure for the code so far: the modules or files, each with a one-line responsibility, and what passes between them. Words only, except for the **one or two pure boundaries** the unit tests below check: for those, give the function's name, inputs and output (for example "`parse(buffer) -> (requests, rest)`"). Shrink it as Stages go on; the Learner is free to diverge elsewhere.
+
+### Skeleton unit tests (when the Skeleton names a pure boundary)
+
+Unit tests in the **Learner's language**, with its standard test tool, for the pure boundaries the Skeleton names: they let a Learner who is still learning design test a piece without a socket or a file. Put them under `unit/` in the staging directory at the path they should have in the Project (for example `unit/tests/unit/test_framing.py`, or the language's conventional test location), and write `unit.json` with the command that runs them from the Project root: `{"command": "python3 -m unittest discover -s tests/unit"}`. Test only the named boundary's contract, 3 to 6 cases.
 
 ## Pressure Stages
 
@@ -62,4 +66,4 @@ Return: the public test names with descriptions; how many Hidden tests and Conce
 
 ## Done when
 
-`primer.md`, `public.py`, `hidden.py` and `check.src.json` exist (and `skeleton.md` when required); every behaviour in the Primer's interface contract has at least one public test; every test has a docstring.
+`primer.md`, `public.py`, `hidden.py` and `check.src.json` exist (and `skeleton.md` when the design Dial calls for a Skeleton, with `unit/` and `unit.json` when it names a pure boundary); every behaviour in the Primer's interface contract has at least one public test; every test has a docstring.

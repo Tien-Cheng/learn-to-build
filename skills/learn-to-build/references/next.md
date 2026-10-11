@@ -6,7 +6,9 @@ Run `./ltb status`. If a Drill is active, ask the Learner to run `./ltb drill fi
 
 If the Project's `ltb` differs from the skill's `assets/ltb` (`cmp`), the skill was updated: copy the new runner over, run `./ltb seal --allow-changed ltb`, and **commit Harness** with `ltb: update runner`.
 
-**Done when** no Drill is active and the runner is current.
+If `.ltb/guard.py` exists, compare it with `assets/adapters/ltb-guard.py` the same way; if it differs, reinstall the adapter as [adapters.md](adapters.md) describes (the guard is not checksummed, so no seal is needed) and **commit Harness** with `ltb: update guard`. Codex will ask the Learner to trust the changed hook.
+
+**Done when** no Drill is active, and the runner and any guard match the skill's copies.
 
 ## 2. Gate
 
@@ -22,7 +24,9 @@ If every Core path row is `reviewed` (or `cut`) and `.ltb/log/retrospective.md` 
 
 Follow [dials.md](dials.md) for the Stage just reviewed.
 
-**Done when** the Dial changes, or "no change", are announced.
+If the design Dial is now 3 or more and `.ltb/config` lists Skeleton unit tests under `[harness] files`, retire them: delete those files, clear `[harness] files` and `[commands] unit`, run `./ltb seal --allow-changed <each file>`, and tell the Learner the structure is theirs from here.
+
+**Done when** the Dial changes, or "no change", are announced, and retired unit tests are sealed out.
 
 ## 5. Drill
 

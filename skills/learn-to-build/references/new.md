@@ -41,7 +41,9 @@ Prefer an X with a clean external interface (a CLI, a wire protocol, a file form
 Then decide, for that language and X:
 
 - **build**: the command that compiles the Learner's code (empty for interpreted languages).
-- **run**: the command that launches the Learner's program. For a server-style X, the program reads its port from the `PORT` environment variable, or the run command contains `{port}`.
+- **run**: the command that launches the Learner's program.
+
+Both run directly, without a shell: one program and its arguments, no `&&`, pipes or globs. If a build needs more, put it in a script in the starter (for example `build.sh`) and make the command `sh build.sh`. For a server-style X, the program reads its port from the `PORT` environment variable, or the run command contains `{port}`.
 
 Run the toolchain's version command (for example `cargo --version`, `go version`, `node --version`).
 
@@ -84,6 +86,8 @@ From the skill dir, copy into the Project root:
 | `assets/ltb` | `ltb` (then `chmod +x ltb`) |
 | `assets/project/AGENTS.md` | `AGENTS.md` |
 | `assets/project/gitignore` | append to `.gitignore` |
+| `assets/project/ignore` | `.ignore` |
+| `assets/project/gitattributes` | append to `.gitattributes` |
 
 Write `.ltb/config`:
 

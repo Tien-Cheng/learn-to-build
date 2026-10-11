@@ -1,0 +1,2 @@
+# Keep Hidden tests out of agents' and editors' search results (ripgrep, IDE search).
+.ltb/hidden/

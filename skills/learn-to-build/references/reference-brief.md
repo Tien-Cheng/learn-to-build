@@ -17,6 +17,7 @@ The Project root, the staged Stage directory `.ltb/staging/NN-slug/`, the Primer
    build = <build command, or empty>
    run = <command that runs your program, relative to the temp dir>
    ```
+   If the staged directory has `unit/` and `unit.json`, your solution must also provide the boundaries the staged `skeleton.md` names: copy `unit/`'s files into the temp directory at the same relative paths and add `unit = <the unit.json command>` under `[commands]`.
 3. From the Project root, run `./ltb test --staging --upto NN --config <temp>/ltb.ini`.
 4. Fix your solution until it is green, or until you are sure a test is wrong: its expected value contradicts the Primer, `spec.md`, or the oracle named in `.ltb/research/overview.md`.
 5. Delete the temp directory.

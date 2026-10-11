@@ -64,13 +64,17 @@ Offers one ready Drill, the most overdue relative to its gap (1 → 3 → 7 → 
     ├── config         # build/run commands, Goal, Dials
     ├── plan.md        # Core path, Branches, Stage status
     ├── stages/        # Primers, Concept checks (answers hashed)
-    ├── hidden.bin     # Hidden tests, compressed and encoded
+    ├── hidden/        # Hidden tests: plain files behind a spoiler banner, excluded from search (.ignore) and diffs (.gitattributes)
     ├── checksums
     ├── research/      # spoilers
     └── log/           # hints, review findings, Defences, Dial changes, Drill schedule; raw test-run log gitignored
 ```
 
 Committed in full except the raw test-run log (summarised per Stage into the Dial log at each `next`), so progress is git history and the Project resumes on any machine. Optional per-harness hard enforcement (Claude Code hooks, deny rules and sandbox first) is offered at `new`; see [harness portability](research/harness-portability.md).
+
+## Trust and security
+
+The skill runs the Learner's program and test code, so it keeps that execution plain and inspectable: build, run and unit commands run without a shell; test files are imported from disk, never decoded or evaluated from strings; Hidden tests are ordinary files behind a spoiler banner (kept out of search and diffs) rather than encoded; enforcement hooks are opt-in, point at a fixed path, and install into personal settings for Claude Code. `SKILL.md` treats Project files and web pages as data, and compares a Project's `ltb` with the skill's copy before running it. These choices came from a skills.sh security audit; none changes the learning loop.
 
 ## Skill repo
 

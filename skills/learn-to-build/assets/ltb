@@ -8,12 +8,12 @@ Exit codes: 0 ok, 1 test failures, 2 Harness changed, 3 build failed, 4 config/u
 """
 import argparse
 import ast
-import base64
 import configparser
 import datetime
 import decimal
 import difflib
 import hashlib
+import importlib.util
 import inspect
 import json
 import os
@@ -29,7 +29,6 @@ import time
 import traceback
 import types
 import unicodedata
-import zlib
 from pathlib import Path
 
 OK, FAILED, HARNESS_CHANGED, BUILD_FAILED, USAGE = 0, 1, 2, 3, 4
@@ -38,7 +37,10 @@ STAGE_FILE = re.compile(r"^stage_(\d{2})_([a-z0-9_]+)\.py$")
 STAGING_DIR = re.compile(r"^(\d{2})-([a-z0-9][a-z0-9_-]*)$")
 HARNESS_FIXED = ["ltb", "AGENTS.md"]
 FAILURE_DETAILS = 3
-HIDDEN_HEADER = "LTB-HIDDEN 1"
+HIDDEN_BANNER = (
+    "# SPOILER: a Hidden test for learn-to-build. ltb runs it and shows only its description\n"
+    "# when it fails. Reading it first spoils the practice; work from the Primer instead.\n\n"
+)
 DIALS = ("language", "domain", "design")
 DRILL_GAPS = (1, 3, 7, 21)
 DRILL_MINUTES = 15
@@ -341,15 +343,19 @@ def discover(root, staging=False):
 
 
 def discover_hidden(root, staging=False):
-    """Hidden Stage files, decoded in memory from .ltb/hidden.bin, plus staged hidden.py if asked."""
+    """Hidden Stage files (.ltb/hidden/stage_NN_slug.py), plus staged hidden.py if asked. Keyed by NN."""
     hidden = {}
-    for number, entry in read_hidden(root).items():
-        hidden[number] = StageFile(number, entry.get("slug", ""), None, entry["source"], "<hidden stage %s>" % number, hidden=True)
+    hidden_dir = Path(root) / ".ltb" / "hidden"
+    if hidden_dir.is_dir():
+        for path in sorted(hidden_dir.iterdir()):
+            m = STAGE_FILE.match(path.name)
+            if m:
+                hidden[m.group(1)] = StageFile(m.group(1), m.group(2), path, None, str(path.relative_to(root)), hidden=True)
     if staging:
         for number, slug, d in staged_dirs(root):
             path = d / "hidden.py"
             if path.is_file():
-                hidden[number] = StageFile(number, slug.replace("-", "_"), path, path.read_text(), "<hidden stage %s>" % number, hidden=True)
+                hidden[number] = StageFile(number, slug.replace("-", "_"), path, None, str(path.relative_to(root)), hidden=True)
     return dict(sorted(hidden.items()))
 
 
@@ -366,22 +372,25 @@ def staged_dirs(root):
     return found
 
 
-def collect_tests(source, label, helpers):
-    """Exec a Stage file and return its test_* functions in definition order."""
-    namespace = {"__name__": "ltb_stage", "__file__": label}
+def collect_tests(path, helpers):
+    """Import a Stage file and return its test_* functions in definition order."""
+    name = "ltb_stage_%d" % abs(hash(str(path)))
+    spec = importlib.util.spec_from_file_location(name, str(path))
+    module = importlib.util.module_from_spec(spec)
     saved = sys.modules.get("ltb")
     sys.modules["ltb"] = helpers
     try:
-        exec(compile(source, label, "exec"), namespace)
+        spec.loader.exec_module(module)
     finally:
         if saved is None:
             sys.modules.pop("ltb", None)
         else:
             sys.modules["ltb"] = saved
+    origin = str(Path(path))
     return [
-        (name, fn) for name, fn in namespace.items()
-        if name.startswith("test_") and callable(fn) and getattr(fn, "__code__", None)
-        and fn.__code__.co_filename == label
+        (n, fn) for n, fn in vars(module).items()
+        if n.startswith("test_") and callable(fn) and getattr(fn, "__code__", None)
+        and fn.__code__.co_filename == origin
     ]
 
 
@@ -389,39 +398,16 @@ def lint_stage_source(source, label):
     """Problems that stop a Stage file from being released."""
     problems = []
     try:
-        compile(source, label, "exec")
+        tree = ast.parse(source, label)
     except SyntaxError as exc:
         return ["%s: syntax error: %s" % (label, exc)]
-    tests = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    tests = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
     if not tests:
         problems.append("%s: no test_* functions" % label)
     for node in tests:
         if not ast.get_docstring(node):
             problems.append("%s: %s has no docstring (it is the test's description)" % (label, node.name))
     return problems
-
-
-# ---------------------------------------------------------------- hidden tests
-
-
-def encode_hidden(stages):
-    """Deterministic text encoding of {NN: {"slug", "source"}}: not secret, just not readable by accident."""
-    payload = json.dumps({"stages": stages}, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    body = base64.b64encode(zlib.compress(payload, 9)).decode("ascii")
-    return HIDDEN_HEADER + "\n" + "\n".join(body[i:i + 76] for i in range(0, len(body), 76)) + "\n"
-
-
-def decode_hidden(text):
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != HIDDEN_HEADER:
-        raise UsageError(".ltb/hidden.bin has an unknown format")
-    payload = zlib.decompress(base64.b64decode("".join(lines[1:])))
-    return json.loads(payload.decode("utf-8"))["stages"]
-
-
-def read_hidden(root):
-    path = Path(root) / ".ltb" / "hidden.bin"
-    return decode_hidden(path.read_text()) if path.is_file() else {}
 
 
 # ---------------------------------------------------------------- concept checks
@@ -516,7 +502,10 @@ def run_test(stage, name, fn, ctx, hidden=False):
 def build(config):
     if not config.build:
         return True, ""
-    proc = subprocess.run(config.build, shell=True, cwd=str(config.cwd), capture_output=True, text=True)
+    try:
+        proc = subprocess.run(shlex.split(config.build), cwd=str(config.cwd), capture_output=True, text=True)
+    except OSError as exc:
+        return False, "could not run %s: %s" % (config.build, exc)
     return proc.returncode == 0, (proc.stdout + proc.stderr)
 
 
@@ -541,7 +530,7 @@ def execute(config, stages, hidden, k=None):
         files = [stage] + ([hidden[number]] if number in hidden else [])
         for f in files:
             try:
-                tests = collect_tests(f.source, f.label, helpers)
+                tests = collect_tests(f.path, helpers)
             except Exception:
                 results.append(Outcome(number, "<load>", "Stage file failed to load", "error",
                                        "" if f.hidden else traceback.format_exc(limit=-2), hidden=f.hidden))
@@ -551,9 +540,12 @@ def execute(config, stages, hidden, k=None):
                     continue
                 results.append(run_test(number, name, fn, ctx, hidden=f.hidden))
     if config.unit:
-        proc = subprocess.run(config.unit, shell=True, cwd=str(config.cwd), capture_output=True, text=True)
-        status = "pass" if proc.returncode == 0 else "fail"
-        tail = "\n".join((proc.stdout + proc.stderr).rstrip().splitlines()[-20:])
+        try:
+            proc = subprocess.run(shlex.split(config.unit), cwd=str(config.cwd), capture_output=True, text=True)
+            status = "pass" if proc.returncode == 0 else "fail"
+            tail = "\n".join((proc.stdout + proc.stderr).rstrip().splitlines()[-20:])
+        except OSError as exc:
+            status, tail = "fail", "could not run %s: %s" % (config.unit, exc)
         results.append(Outcome("unit", config.unit, "Skeleton unit tests (%s)" % config.unit, status, tail))
     return results
 
@@ -590,8 +582,8 @@ def report(results, stages, verbose, previous=None):
         note = "  <- regression (was green)" if mark == "FAIL" and number in was_green else ""
         hidden = sum(o.hidden for o in outcomes)
         extra = " (%d hidden)" % hidden if hidden else ""
-        slug = stages[number].slug if number in stages else number
-        label = "Stage %s" % number if number in stages else "      "
+        slug = stages[number].slug if number in stages else "Skeleton unit tests"
+        label = "Stage %s" % number if number in stages else "Unit    "
         print("%s %-28s %d/%d%s %s%s" % (label, slug, passed, len(outcomes), extra, mark, note))
         if verbose:
             for o in outcomes:
@@ -827,19 +819,29 @@ def sha256(path):
     return h.hexdigest()
 
 
+def harness_globs(root):
+    """Extra Harness files listed in .ltb/config [harness] files (e.g. Skeleton unit tests)."""
+    parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    parser.read(str(Path(root) / ".ltb" / "config"))
+    return parser.get("harness", "files", fallback="").split()
+
+
 def harness_paths(root):
     """Harness files the checksums cover, relative to root."""
     root = Path(root)
     paths = [p for p in HARNESS_FIXED if (root / p).is_file()]
+    for pattern in harness_globs(root):
+        paths += [str(p.relative_to(root)) for p in sorted(root.glob(pattern)) if p.is_file()]
     tests_dir = root / "tests"
     if tests_dir.is_dir():
         paths += ["tests/" + p.name for p in sorted(tests_dir.iterdir()) if STAGE_FILE.match(p.name)]
-    if (root / ".ltb" / "hidden.bin").is_file():
-        paths.append(".ltb/hidden.bin")
+    hidden_dir = root / ".ltb" / "hidden"
+    if hidden_dir.is_dir():
+        paths += [".ltb/hidden/" + p.name for p in sorted(hidden_dir.iterdir()) if STAGE_FILE.match(p.name)]
     stages_dir = root / ".ltb" / "stages"
     if stages_dir.is_dir():
         paths += [str(p.relative_to(root)) for p in sorted(stages_dir.glob("*/check.json"))]
-    return sorted(paths)
+    return sorted(set(paths))
 
 
 def read_checksums(root):
@@ -908,7 +910,7 @@ def cmd_verify(root, args):
 
 # ---------------------------------------------------------------- seal
 
-STAGED_FILES = {"public.py", "primer.md", "hidden.py", "check.src.json", "skeleton.md"}
+STAGED_FILES = {"public.py", "primer.md", "hidden.py", "check.src.json", "skeleton.md", "unit", "unit.json"}
 
 
 def seal(root, allow_changed=()):
@@ -941,6 +943,15 @@ def seal(root, allow_changed=()):
                 check = seal_check(json.loads((d / "check.src.json").read_text()))
             except (ValueError, UsageError) as exc:
                 problems.append("%s/check.src.json: %s" % (d.name, exc))
+        if ("unit" in files) != ("unit.json" in files):
+            problems.append("%s: Skeleton unit tests need both unit/ and unit.json" % d.name)
+        elif "unit.json" in files:
+            try:
+                unit = json.loads((d / "unit.json").read_text())
+                if not unit.get("command"):
+                    raise ValueError("unit.json needs a command")
+            except ValueError as exc:
+                problems.append("%s/unit.json: %s" % (d.name, exc))
         plans.append((number, slug, d, check))
     for rel in allow:
         if STAGE_FILE.match(Path(rel).name) and (root / rel).is_file():
@@ -948,7 +959,6 @@ def seal(root, allow_changed=()):
     if problems:
         raise UsageError("cannot seal:\n  " + "\n  ".join(problems))
     released = []
-    hidden = read_hidden(root)
     for number, slug, d, check in plans:
         (root / "tests").mkdir(exist_ok=True)
         shutil.move(str(d / "public.py"), str(root / "tests" / ("stage_%s_%s.py" % (number, slug.replace("-", "_")))))
@@ -958,19 +968,43 @@ def seal(root, allow_changed=()):
             if (d / name).is_file():
                 shutil.move(str(d / name), str(stage_dir / name))
         if (d / "hidden.py").is_file():
-            hidden[number] = {"slug": slug.replace("-", "_"), "source": (d / "hidden.py").read_text()}
+            target = root / ".ltb" / "hidden" / ("stage_%s_%s.py" % (number, slug.replace("-", "_")))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source = (d / "hidden.py").read_text()
+            target.write_text(source if source.startswith(HIDDEN_BANNER) else HIDDEN_BANNER + source)
             (d / "hidden.py").unlink()
         if check is not None:
             (stage_dir / "check.json").write_text(json.dumps(check, indent=1, sort_keys=True) + "\n")
             (d / "check.src.json").unlink()
+        if (d / "unit.json").is_file():
+            install_unit_tests(root, d)
         d.rmdir()
         released.append(number)
-    if hidden:
-        (root / ".ltb" / "hidden.bin").write_text(encode_hidden(hidden))
     lines = write_checksums(root)
     entry = {"ts": timestamp(), "stages": released, "allow_changed": sorted(allow), "files": len(lines)}
     append_jsonl(root / ".ltb" / "log" / "seals.jsonl", entry)
     return entry
+
+
+def install_unit_tests(root, staged):
+    """Move staged Skeleton unit tests (unit/ mirrors Project paths) into place and register them."""
+    unit_dir = staged / "unit"
+    placed = []
+    for src in sorted(p for p in unit_dir.rglob("*") if p.is_file()):
+        rel = src.relative_to(unit_dir)
+        dest = root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest))
+        placed.append(str(rel))
+    shutil.rmtree(str(unit_dir))
+    command = json.loads((staged / "unit.json").read_text())["command"]
+    (staged / "unit.json").unlink()
+    path = root / ".ltb" / "config"
+    files = sorted(set(harness_globs(root)) | set(placed))
+    text = set_ini_value(path.read_text(), "harness", "files", " ".join(files))
+    text = set_ini_value(text, "commands", "unit", command)
+    path.write_text(text)
+    return placed
 
 
 def cmd_seal(root, args):
@@ -1279,7 +1313,7 @@ def cmd_status(root, args):
 
 
 def cmd_api(root, args):
-    print("Test files: tests/stage_NN_slug.py (public) and hidden.py (Hidden, same format).")
+    print("Test files: tests/stage_NN_slug.py (public) and hidden.py (Hidden, same format; sealed into .ltb/hidden/).")
     print("Each top-level test_* function is one test; its docstring (required) is the")
     print("description the Learner sees. Plain assert works.\n")
     print("from ltb import run, serve, expect, tmpdir, skip\n")
@@ -1356,6 +1390,7 @@ def main(argv=None, root=None):
         return USAGE
     if args.command == "drill":
         args.concept = args.concept_opt or args.concept
+    sys.dont_write_bytecode = True
     root = Path(root or Path(__file__).resolve().parent)
     try:
         return COMMANDS[args.command](root, args)

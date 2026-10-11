@@ -21,23 +21,22 @@ def stage_with_hidden(make_project, solution="kv"):
     return project
 
 
-def test_encoding_round_trips_and_is_deterministic(ltb):
-    stages = {"03": {"slug": "x", "source": "print('hi')\n"}}
-    text = ltb.encode_hidden(stages)
-    assert text.startswith("LTB-HIDDEN 1\n")
-    assert "print" not in text
-    assert ltb.decode_hidden(text) == stages
-    assert ltb.encode_hidden(stages) == text
-
-
-def test_seal_moves_hidden_tests_into_hidden_bin(make_project):
+def test_seal_stores_hidden_tests_as_bannered_files(make_project):
     project = stage_with_hidden(make_project)
-    assert (project.root / ".ltb" / "hidden.bin").is_file()
-    assert ".ltb/hidden.bin" in (project.root / ".ltb" / "checksums").read_text()
-    assert "SENTINEL_IN" not in (project.root / ".ltb" / "hidden.bin").read_text()
+    hidden = project.root / ".ltb" / "hidden" / "stage_01_set_get.py"
+    assert hidden.read_text().startswith("# SPOILER")
+    assert ".ltb/hidden/stage_01_set_get.py" in (project.root / ".ltb" / "checksums").read_text()
     code, out = project.run("test")
     assert code == 0, out
     assert "4/4 (1 hidden)" in out
+    assert not list(project.root.rglob("__pycache__"))
+
+
+def test_edited_hidden_test_refuses_to_grade(make_project):
+    project = stage_with_hidden(make_project)
+    hidden = project.root / ".ltb" / "hidden" / "stage_01_set_get.py"
+    hidden.write_text(hidden.read_text() + "\n")
+    assert project.run("test")[0] == 2
 
 
 def test_hidden_failure_shows_description_only(make_project):

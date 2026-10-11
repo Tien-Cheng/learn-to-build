@@ -18,6 +18,10 @@ Then write **How the real X does it**: one or two paragraphs, from `.ltb/researc
 
 When the Stage's mode is **Pair or Lead**, some code was written by the agent (see the assist log). Write 2 or 3 **Walkthrough questions** about it, each answerable in a few sentences by someone who understands the code ("why does the loop stop at the cell pointer array?", "what happens when the key is missing?"), each followed by what a good answer covers. In **Lead** mode, also judge the Approach: findings may target it as well as the code.
 
+### Bug hunt (Lead mode: required)
+
+Write a short, plausible patch to the agent-written code (a refactor or a small extension, as a unified diff of 10 to 30 lines) that contains exactly **one planted defect** a careful reviewer could find by reading: an off-by-one, a missed edge case from the Primer's contract, a resource left open, a wrong error path. Subtle but fair; never a typo. Under it, an `Answer:` line for the tutor: where the defect is, and what goes wrong for which input.
+
 Name the **concept paths**: the smallest set of the Learner's files that implement this Stage's concept, cut at a module boundary, so a Drill can delete them and the Learner can rebuild them. Prefer whole files.
 
 After Stage 01 only, give a **design estimate** from 1 to 5 with a one-line reason: 1 means everything in one place with no separation, 3 means sensible separation for the size, 5 means clean boundaries a reviewer would hold up as an example.
@@ -32,6 +36,10 @@ Concept paths: <path> [<path> ...]
 ## Walkthrough                         (Pair and Lead only)
 1. <question>
    Covers: <what a good answer includes>
+
+## Bug hunt                            (Lead only)
+<unified diff with one planted defect>
+Answer: <location, and what goes wrong for which input>
 
 ## R1 <short title>
 Status: open
@@ -54,7 +62,7 @@ Write:
 2. **Defences revisited**: for every defended finding, whether it held up under later Stages, especially Pressure Stages (use the size of the diffs they needed as evidence): "held up" or "cost something", with one line of evidence.
 3. **Three design lessons**: exactly three, specific to this codebase, each one sentence plus an example from their code.
 4. **Drills**: two to four concepts that span several Stages, each with its concept paths.
-5. **Assistance**: if any Stages used Pair or Lead, compare Drill results on those concepts with Solo ones, and say in two sentences what the assistance cost or saved.
+5. **Assistance**: if any Stages used Pair or Lead, compare Drill results on those concepts with Solo ones, and Bug hunt results across Lead Stages, and say in two sentences what the assistance cost or saved.
 
 ## Done when
 

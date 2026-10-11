@@ -1,0 +1,2 @@
+# Hidden tests are spoilers: keep their contents out of diffs.
+.ltb/hidden/** -diff linguist-generated

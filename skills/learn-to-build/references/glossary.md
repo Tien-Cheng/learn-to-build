@@ -77,7 +77,7 @@ One to three quick prediction questions at the end of a Primer that unlock the S
 _Avoid_: Quiz, MCQ, gate
 
 **Skeleton**:
-A suggested module structure given when the design-skill Dial is low, withdrawn progressively over later Stages.
+A suggested module structure given when the design-skill Dial is low, withdrawn progressively over later Stages; its one or two pure boundaries come with unit tests in the Learner's language.
 _Avoid_: Template, starter code
 
 **Reference solution**:
@@ -89,7 +89,7 @@ The pass/fail checks that decide whether a Stage's behaviour is correct, exercis
 _Avoid_: Grader, autograder
 
 **Hidden test**:
-A Test suite check stored obfuscated in the Project repo so it cannot be read by accident; on failure the Learner sees its description, never its input.
+A Test suite check kept in `.ltb/hidden/` behind a spoiler banner and out of search results, so it is not read by accident; on failure the Learner sees its description, never its input.
 _Avoid_: Private test, secret test
 
 **Design review**:
@@ -121,6 +121,10 @@ _Avoid_: AI level, autonomy, help setting
 **Approach**:
 The Learner's short written plan for a Lead Stage (decomposition, data, edge cases), written before the agent writes any code.
 _Avoid_: Prompt, spec, plan (the plan is the Project's Stage list)
+
+**Bug hunt**:
+A Lead-Stage review exercise: the Learner reviews a proposed patch to the agent-written code that hides one planted defect, and must find it. The patch is never applied.
+_Avoid_: Planted bug, spot-the-bug
 
 **Walkthrough**:
 The Learner's explanation of agent-written code, checked by the agent, before that code counts as done.

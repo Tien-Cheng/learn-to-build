@@ -12,7 +12,7 @@ Run `./ltb test`. It must print `green` (public and Hidden). If not, say which S
 
 **dispatch** a reviewer with [reviewer-brief.md](reviewer-brief.md) in Stage mode. Inputs:
 
-- the Solution code: every file in the Project from `git ls-files --cached --others --exclude-standard`, minus the Harness (`ltb`, `AGENTS.md`, `.claude/`, `.codex/`, `tests/`, `.ltb/`);
+- the Solution code: every file in the Project from `git ls-files --cached --others --exclude-standard`, minus the Harness (`ltb`, `AGENTS.md`, `.ignore`, `.gitattributes`, `.claude/`, `.codex/`, `tests/`, `.ltb/`, and the files under `[harness] files` in `.ltb/config`);
 - this Stage's number, slug, plan row and Primer;
 - `.ltb/research/` (spoilers are fine for the reviewer);
 - this Stage's lines from `.ltb/log/hints.jsonl`;
@@ -20,11 +20,11 @@ Run `./ltb test`. It must print `green` (public and Hidden). If not, say which S
 - Goal and Dials from `.ltb/config`;
 - earlier `.ltb/log/review-*.md` files, so defended points are not re-raised.
 
-**Done when** the report is back in the format the brief defines.
+**Done when** the report is back in the format the brief defines. In Lead mode it must include a `## Bug hunt` with an `Answer:` line, and in Pair or Lead mode a `## Walkthrough`; if either is missing, send the reviewer back for it.
 
 ## 3. Record
 
-Write the report to `.ltb/log/review-NN.md`, every finding with `Status: open`.
+Write the report to `.ltb/log/review-NN.md`, every finding with `Status: open`. Keep the Bug hunt's `Answer:` out of the file until the hunt is over.
 
 ## 4. Walkthrough (Pair and Lead only)
 
@@ -32,7 +32,18 @@ Ask the Learner the report's Walkthrough questions about the agent-written code,
 
 **Done when** every Walkthrough question has an answer the Learner restated correctly.
 
-## 5. Walk the findings
+## 5. Bug hunt (Lead only)
+
+The report includes a **Bug hunt**: a proposed change to the agent-written code containing one planted, realistic defect. Show the Learner the change exactly as written (never the answer) and ask them to review it as they would a teammate's AI-generated patch: where is the bug, and what goes wrong? They can run it against their own copy if they like, on a scratch branch.
+
+- Found it (location and consequence both right): confirm, and explain anything they missed.
+- Not yet: give one nudge (which function, or which input class to think about), then let them try once more. After that, reveal the answer and walk through why it was easy to miss.
+
+Record the patch, their answers and `Found: yes | after nudge | no` under `## Bug hunt` in `review-NN.md`. The planted change is never applied to their code.
+
+**Done when** the Bug hunt has a recorded result.
+
+## 6. Walk the findings
 
 Take the findings in order. For each, present it and **ask**: fix it, or defend the current design?
 
@@ -41,7 +52,7 @@ Take the findings in order. For each, present it and **ask**: fix it, or defend 
 
 **Done when** `review-NN.md` has no `Status: open`.
 
-## 6. Close
+## 7. Close
 
 - Present the report's "How the real X does it" section.
 - After Stage 01, set the design Dial to the reviewer's estimate: `./ltb dial design <n> --evidence "Stage 01 review: <reason>"`, and tell the Learner what it means (see [dials.md](dials.md)).
