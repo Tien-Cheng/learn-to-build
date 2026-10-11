@@ -65,7 +65,7 @@ When the plan row's Kind is `pressure`, the Stage is a requirement change the re
 Before reporting, reread your files as the Learner will meet them:
 
 - **Concept check**: every question has exactly one defensible answer; for `choice`, no two options say the same thing in different words, and each wrong option is wrong for a reason the Primer explains. Each prompt contains everything needed to answer it.
-- **Tests**: every docstring is unique and names one behaviour; every expected value can be derived from the Primer alone (the Learner never sees `spec.md`).
+- **Tests**: every docstring is unique and names one behaviour; every expected value can be derived from the Primer alone, since the Primer is the spec the Learner works from.
 - **Primer**: every behaviour a public or Hidden test checks is stated in its interface contract.
 
 Fix anything that fails, then report.
