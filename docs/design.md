@@ -30,7 +30,7 @@ Invoked as `/learn-to-build <verb>`; one router skill, each verb's instructions 
 1. **Goal**: language, domain, or design. With no X given, suggest one fitting the Goal.
 2. **Language**: any that produces a runnable program; the agent works out build/run commands into `.ltb/config`.
 3. **Diagnostic** (skippable; built in milestone 3, until then Dials start at 3/3/3): adaptive "what does this print" quiz for language fluency (3–6 questions), 2–3 concept questions for domain. Design skill is read from Stage 1's Design review. Use the harness's structured-question tool if it has one, numbered options otherwise.
-4. **Research** X with subagents into `.ltb/research/` (plain text, marked spoilers), citing primary sources. Includes real requirement changes X went through, to seed Pressure Stages.
+4. **Research** X with subagents into `.ltb/research/` (plain text, marked spoilers), citing primary sources. Includes real requirement changes X went through, to seed Pressure Stages. Three researchers (spec, history, architecture) run in parallel in the background while the Diagnostic and Harness setup go ahead; only the plan waits for them. Researchers name an oracle rather than build one: expected values are checked Stage by Stage by the Reference solution. See [research step timing](research/research-step-timing.md).
 5. **Plan**: Core path plus Branches, Pressure Stages placed at Branch points. The Learner may cut, reorder or add once; then it locks.
 6. **Generate** the Project repo at a Learner-chosen path (default `./<x>`), standalone or inside a learning monorepo.
 

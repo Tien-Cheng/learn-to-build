@@ -59,25 +59,25 @@ Create the directory and `.ltb/` inside it. Run `git init` there unless the dire
 
 ## 6. Research
 
-**dispatch** a researcher with [research-brief.md](research-brief.md). Inputs: X, the language, the Goal, and the output directory `<project>/.ltb/research/`.
+**dispatch** three researchers **in the background**, each with [research-brief.md](research-brief.md). Inputs for each: X, the language, the Goal, the output directory `<project>/.ltb/research/`, and the files it writes:
 
-When it returns, open each file and check it against the brief's **Done when**.
+1. **Spec researcher**: `overview.md` and `spec.md`
+2. **History researcher**: `history.md`
+3. **Architecture researcher**: `architecture.md`
 
-**Done when** `overview.md`, `spec.md`, `architecture.md` and `history.md` exist in `.ltb/research/`, each claim carries a source link, and `history.md` lists at least three requirement changes the real X went through.
+Tell the Learner, in one line, that research runs for several minutes while you set up the rest.
+
+When a later step waits for a researcher, open the files it wrote and check them against the brief's **Done when**; send it back once with what is missing if they fall short.
+
+**Done when** all three researchers are running (or, without background subagents, have reported).
 
 ## 7. Diagnostic
 
-Follow [diagnostic.md](diagnostic.md).
+Follow [diagnostic.md](diagnostic.md). Its domain questions need `overview.md`: wait for the Spec researcher before them.
 
 **Done when** you have starting values for the language, domain and design Dials.
 
-## 8. Plan
-
-Follow [planning.md](planning.md) to draft `.ltb/plan.md`. Show the Learner the Core path (marking Pressure Stages) and the Branches, and **ask** whether they want to cut, reorder or add Stages. Apply their edits once, then add the `Locked:` line.
-
-**Done when** `.ltb/plan.md` exists with a `Locked:` line.
-
-## 9. Generate the Harness and starter
+## 8. Generate the Harness and starter
 
 From the skill dir, copy into the Project root:
 
@@ -120,6 +120,12 @@ Run `./ltb seal` to record the first checksums.
 
 **Done when** the build command succeeds, `./ltb verify` prints `Harness ok`, and `./ltb test` prints `No Stages released yet`.
 
+## 9. Plan
+
+Wait for the Spec and History researchers. Then follow [planning.md](planning.md) to draft `.ltb/plan.md`. Show the Learner the Core path (marking Pressure Stages) and the Branches, and **ask** whether they want to cut, reorder or add Stages. Apply their edits once, then add the `Locked:` line.
+
+**Done when** `.ltb/plan.md` exists with a `Locked:` line.
+
 ## 10. Stage 01
 
 Follow [stage-release.md](stage-release.md) for the first Core Stage in the plan.
@@ -134,7 +140,7 @@ Offer the enforcement adapter in [adapters.md](adapters.md) for the harnesses th
 
 ## 12. Commit and hand off
 
-Commit everything in the Project directory, starter included, with the message `ltb: new <x>`.
+Wait for the Architecture researcher. Then commit everything in the Project directory, starter included, with the message `ltb: new <x>`.
 
 Then tell the Learner, briefly:
 
@@ -144,4 +150,4 @@ Then tell the Learner, briefly:
 - to run `./ltb test` until it prints `green`; that loop, and any debugging, is theirs;
 - to come back with `hint` when stuck (one rung at a time, never code), `review` when green, then `next`.
 
-**Done when** the commit exists and the Learner has the Primer path.
+**Done when** the commit exists, includes all four files in `.ltb/research/`, and the Learner has the Primer path.

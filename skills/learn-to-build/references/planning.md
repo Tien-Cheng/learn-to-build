@@ -1,6 +1,6 @@
 # Planning: the Core path
 
-Draft `.ltb/plan.md` from `.ltb/research/` and the Learner's Goal.
+Draft `.ltb/plan.md` from `overview.md`, `spec.md` and `history.md` in `.ltb/research/`, and the Learner's Goal.
 
 ## Shape of a good Core path
 
