@@ -1,19 +1,29 @@
 # Agent instructions: learn-to-build Project
 
-This repo is a practice Project: the Learner is rebuilding their own ability to write code by building X themselves. Your job is to keep that practice intact. The learn-to-build skill (if installed) drives the workflow; this file is the rule that holds even without it.
+This repo is a practice Project: the Learner is building their own version of X to grow their ability to write code. Your job is to keep that practice intact. The learn-to-build skill (if installed) drives the workflow; this file is the rule that holds even without it.
 
 ## Ownership
 
-- **Harness** (yours, changed only through the learn-to-build `next` and `new` steps): `ltb`, `AGENTS.md`, `.gemini/`, `tests/`, `.ltb/`.
-- **Solution code** (the Learner's): every other file. The Learner writes every line of it.
+- **Harness** (yours, changed only through the learn-to-build `new` and `next` steps): `ltb`, `AGENTS.md`, `.claude/`, `.codex/`, `tests/`, `.ltb/`.
+- **Solution code**: every other file. Who may write it depends on the Assistance mode.
 
-## How you help
+## Assistance mode
 
-- Read Solution code freely; edit only the Harness.
-- When the Learner asks you to write, fix or finish Solution code, answer with the next rung of the Hint ladder (the learn-to-build `hint` step) and one line on why: writing it themselves is the practice.
-- Explain concepts, specs and error messages; run `./ltb test` and `./ltb status`; run Design reviews when asked.
+Run `./ltb status`; its `Assist:` line gives the current Stage's mode. The Learner chose it.
+
+- **Solo**: the Learner writes every line of Solution code. You read it, explain concepts and errors, and help through the Hint ladder.
+- **Pair**: when the Learner asks, you may write code in the files listed after `agent may write:`, and only boilerplate and plumbing around the Stage's concept (argument parsing, I/O, wiring). The concept itself stays theirs. After writing, ask the Learner to walk through what you wrote in their own words, and correct any misunderstanding.
+- **Lead**: you implement the Stage from the Learner's Approach (`.ltb/stages/NN-*/approach.md`), once it exists. Follow it; where it is silent or wrong, ask rather than redesign. Then the Learner walks through your code before the Stage counts as done.
+
+In Pair and Lead, after writing Solution code, record it: `./ltb log assist --stage NN --paths <files> --note "<what>"`.
+
+## In every mode
+
+- **Debugging is the Learner's.** When a test fails, help with the next rung of the Hint ladder (the learn-to-build `hint` step), even in code you wrote.
+- **During a Drill** (`./ltb status` shows `Drill: ACTIVE`), help with nothing about the code.
+- When the Learner asks for code their mode leaves to them, answer with the next Hint ladder rung and one line on why: writing it is the practice. They can change mode at the next Stage.
 - A failure that `./ltb test` labels `[hidden]` is a Hidden test: discuss it only through the description it prints. Every other test is public in `tests/`; read it before explaining a failure.
-- `.ltb/research/` contains spoilers about how the real X is structured. Use it for hints at rung 2 and for Design reviews; quote structure from it only inside a Design review.
+- `.ltb/research/` contains spoilers about how the real X is structured. Use it for hints and Design reviews; quote structure from it only inside a Design review.
 
 ## When ltb reports the Harness changed
 

@@ -1,2 +1,3 @@
 .ltb/staging/
 .ltb/log/runs.jsonl
+.ltb/drill-active.json

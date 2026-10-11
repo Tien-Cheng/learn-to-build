@@ -9,13 +9,17 @@ A portable agent skill that turns "build your own X" into a Project the Learner 
 
 ## Principles
 
-1. The Learner writes all Solution code; the agent writes only the Harness ([ADR 0001](adr/0001-learner-authors-all-solution-code.md)).
+1. The Learner writes Solution code; the agent writes the Harness, plus only what the Learner's chosen Assistance mode allows ([ADR 0001](adr/0001-learner-authors-all-solution-code.md)).
 2. Tests judge behaviour through X's external interface; Design reviews judge structure ([ADR 0002](adr/0002-black-box-test-suites.md)).
 3. The code → test → fix loop runs with no agent at all (`./ltb test`). The agent appears only at Stage boundaries.
 4. Struggle before explanation for structure; explanation before struggle for specs (Primer = "what", review = "how real X does it").
 5. Practice tool, not exam: prevent accidents, don't police a Learner who chooses to bypass.
 6. Calibrate from evidence, and announce every adjustment.
 7. Avoid over-engineering in the skill and in what the Design review rewards.
+
+## Assistance modes
+
+The Learner picks how much Solution code the agent may write, per Project at `new` and per Stage at `next`: **Solo** (none, the default), **Pair** (boilerplate around the Stage's concept in files the Learner names; the Learner walks through it), **Lead** (the agent implements the Learner's written Approach; the Learner walks through and debugs it). Debugging, Drills, Concept checks and Design reviews stay the Learner's in every mode; agent edits are logged; Dials rise only on evidence from code the Learner wrote. See [ADR 0001](adr/0001-learner-authors-all-solution-code.md).
 
 ## Flow
 
@@ -53,7 +57,6 @@ Offers one ready Drill, the most overdue relative to its gap (1 → 3 → 7 → 
 ```
 <x>/
 ├── AGENTS.md          # Solution code paths are Learner-owned; agent limited to hints and reviews
-├── .gemini/settings.json  # makes Gemini CLI read AGENTS.md (Claude Code, Codex, Pi, OpenCode, Cursor read it by default)
 ├── ltb                # Python 3, stdlib only: test runner, checksum guard, Hidden test decoder
 ├── tests/             # public black-box tests, Stages 1..N
 ├── <learner's code>
@@ -71,7 +74,7 @@ Committed in full except the raw test-run log (summarised per Stage into the Dia
 
 ## Skill repo
 
-This repo holds only the skill, at `skills/learn-to-build/`, installed with the skills CLI (`npx skills add <owner>/learn-to-build`), which writes to both `.claude/skills/` (Claude Code) and `.agents/skills/` (Codex, Pi, OpenCode, Cursor, Gemini). Standard SKILL.md frontmatter only. Assume the harness can spawn subagents. POSIX only (macOS, Linux, WSL).
+This repo holds only the skill, at `skills/learn-to-build/`, installed with the skills CLI (`npx skills add <owner>/learn-to-build`), which writes to both `.claude/skills/` (Claude Code) and `.agents/skills/` (Codex, Pi, OpenCode, Cursor). Standard SKILL.md frontmatter only. Assume the harness can spawn subagents. POSIX only (macOS, Linux, WSL).
 
 ## Build order
 

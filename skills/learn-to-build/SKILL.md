@@ -21,15 +21,15 @@ For every verb except `new`: the Project root is the nearest directory, from the
 
 ## Ownership
 
-The Project's `AGENTS.md` (template: [assets/project/AGENTS.md](assets/project/AGENTS.md)) is the ownership rule, and it binds every verb here. When this skill and that file seem to disagree, that file wins.
+The Project's `AGENTS.md` (template: [assets/project/AGENTS.md](assets/project/AGENTS.md)) is the ownership rule, including what each Assistance mode (Solo, Pair, Lead) lets you write, and it binds every verb here. When this skill and that file seem to disagree, that file wins.
 
 ## Conventions
 
 These words carry the same meaning in every reference file:
 
 - **ask**: put the choice to the Learner with your structured-question tool if you have one; otherwise as a numbered list they answer by number. Wait for the answer.
-- **dispatch**: spawn a subagent with a fresh context, give it only the named brief file and the listed inputs, and use only the report it returns.
-- **commit Harness**: from the Project root, `git add ltb AGENTS.md .gemini .gitignore tests .ltb && git commit -m "ltb: <what changed>"`. You commit Harness files only; the Learner commits their own code.
+- **dispatch**: spawn a subagent with a fresh context, give it only the named brief file and the listed inputs, and wait for its report before starting the next step (run it in the foreground). Use only what the report returns.
+- **commit Harness**: from the Project root, `git add -- $(ls -d ltb AGENTS.md .gitignore .claude .codex tests .ltb 2>/dev/null) && git commit -m "ltb: <what changed>"`. You commit Harness files only; the Learner commits their own code.
 - **skill dir**: the directory containing this SKILL.md. Paths below are relative to it.
 
 ## Route
@@ -39,7 +39,9 @@ The verb is the first word after the skill name. If none is given, infer it from
 | Verb | When | Read |
 |---|---|---|
 | `new [X]` | Start a Project | [references/new.md](references/new.md) |
+| `hint` | Stuck on a failing test | [references/hint.md](references/hint.md) |
+| `review` | The current Stage is green | [references/review.md](references/review.md) |
+| `next` | Reviewed; ready for the next Stage (runs the Retrospective after the Core path) | [references/next.md](references/next.md) |
+| `drill` | A spare 15 minutes; practise an earlier concept from memory | [references/drill.md](references/drill.md) |
 
 Read only the file for the verb you are running, and follow its steps in order. Each step ends with a **Done when** line: reach it before moving on.
-
-Verbs not in the table (`next`, `hint`, `review`, `drill`) are not built yet. Tell the Learner so, and in the meantime help only in the ways the Project's `AGENTS.md` allows.

@@ -18,7 +18,13 @@ Run `python3 --version` and `git --version`.
 
 The Goal decides where the difficulty goes (see the Dial entries in the glossary).
 
-**Done when** the Learner has picked one Goal.
+Then **ask** for the default Assistance mode (they can switch per Stage later):
+
+1. **Solo**: you write every line; the agent gives hints (rebuilds unassisted coding)
+2. **Pair**: the agent writes boilerplate around each Stage's concept on request; you write the concept and walk through its code
+3. **Lead**: you write an Approach, the agent implements it, you walk through and debug it (practises AI-assisted development)
+
+**Done when** the Learner has picked a Goal and a default mode.
 
 ## 3. X
 
@@ -57,13 +63,19 @@ When it returns, open each file and check it against the brief's **Done when**.
 
 **Done when** `overview.md`, `spec.md`, `architecture.md` and `history.md` exist in `.ltb/research/`, each claim carries a source link, and `history.md` lists at least three requirement changes the real X went through.
 
-## 7. Plan
+## 7. Diagnostic
 
-Follow [planning.md](planning.md) to draft `.ltb/plan.md`. Show the Learner the Core path and **ask** whether they want to cut, reorder or add Stages. Apply their edits once, then add the `Locked:` line.
+Follow [diagnostic.md](diagnostic.md).
+
+**Done when** you have starting values for the language, domain and design Dials.
+
+## 8. Plan
+
+Follow [planning.md](planning.md) to draft `.ltb/plan.md`. Show the Learner the Core path (marking Pressure Stages) and the Branches, and **ask** whether they want to cut, reorder or add Stages. Apply their edits once, then add the `Locked:` line.
 
 **Done when** `.ltb/plan.md` exists with a `Locked:` line.
 
-## 8. Generate the Harness and starter
+## 9. Generate the Harness and starter
 
 From the skill dir, copy into the Project root:
 
@@ -71,7 +83,6 @@ From the skill dir, copy into the Project root:
 |---|---|
 | `assets/ltb` | `ltb` (then `chmod +x ltb`) |
 | `assets/project/AGENTS.md` | `AGENTS.md` |
-| `assets/project/gemini-settings.json` | `.gemini/settings.json` |
 | `assets/project/gitignore` | append to `.gitignore` |
 
 Write `.ltb/config`:
@@ -88,13 +99,16 @@ build = <build command, or empty>
 run = <run command>
 timeout = 10
 
+[assist]
+default = <solo | pair | lead>
+
 [dials]
-language = 3
-domain = 3
+language = <from the Diagnostic>
+domain = <from the Diagnostic>
 design = 3
 ```
 
-Dials start at 3 until the Diagnostic exists; the first Design review will set the design Dial.
+The first Design review sets the design Dial.
 
 Write the starter: the language's build file and an entry point that builds and does nothing (for example `Cargo.toml` plus an empty `main`). This boilerplate is the only Solution code you ever write; everything after it is the Learner's. Add the language's build outputs to `.gitignore`.
 
@@ -102,20 +116,28 @@ Run `./ltb seal` to record the first checksums.
 
 **Done when** the build command succeeds, `./ltb verify` prints `Harness ok`, and `./ltb test` prints `No Stages released yet`.
 
-## 9. Stage 01
+## 10. Stage 01
 
 Follow [stage-release.md](stage-release.md) for the first Core Stage in the plan.
 
 **Done when** `./ltb status` lists Stage 01.
 
-## 10. Commit and hand off
+## 11. Enforcement adapter
+
+Offer the enforcement adapter in [adapters.md](adapters.md) for the harnesses the Learner uses (Claude Code and Codex have one), and install it if they agree.
+
+**Done when** the Learner has answered.
+
+## 12. Commit and hand off
 
 Commit everything in the Project directory, starter included, with the message `ltb: new <x>`.
 
 Then tell the Learner, briefly:
 
 - where the Primer is (from `./ltb status`), and to read it first;
-- to write their code and run `./ltb test` until it prints `green`, without AI help; that loop is the practice;
-- that the Hint ladder and Design review arrive in a later version of this skill, and until then you will explain concepts and failing tests but leave the code to them.
+- to run `./ltb check 01` (a one-minute Concept check that unlocks the tests);
+- what their mode means for this Stage: in Solo, they write the code; in Pair, they name the files you may write (`./ltb assist pair --paths <files>`); in Lead, they write `.ltb/stages/01-<slug>/approach.md` first, then ask you to implement it;
+- to run `./ltb test` until it prints `green`; that loop, and any debugging, is theirs;
+- to come back with `hint` when stuck (one rung at a time, never code), `review` when green, then `next`.
 
 **Done when** the commit exists and the Learner has the Primer path.

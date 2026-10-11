@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(apply_patch|Edit|Write)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "d=\"$PWD\"; while [ \"$d\" != / ] && [ ! -f \"$d/.ltb/guard.py\" ]; do d=$(dirname \"$d\"); done; if [ -f \"$d/.ltb/guard.py\" ]; then exec python3 \"$d/.ltb/guard.py\"; fi",
+            "timeout": 30,
+            "statusMessage": "learn-to-build: checking Assistance mode"
+          }
+        ]
+      }
+    ]
+  }
+}

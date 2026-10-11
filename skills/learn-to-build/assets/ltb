@@ -8,8 +8,10 @@ Exit codes: 0 ok, 1 test failures, 2 Harness changed, 3 build failed, 4 config/u
 """
 import argparse
 import ast
+import base64
 import configparser
 import datetime
+import decimal
 import difflib
 import hashlib
 import inspect
@@ -26,14 +28,21 @@ import tempfile
 import time
 import traceback
 import types
+import unicodedata
+import zlib
 from pathlib import Path
 
 OK, FAILED, HARNESS_CHANGED, BUILD_FAILED, USAGE = 0, 1, 2, 3, 4
 
 STAGE_FILE = re.compile(r"^stage_(\d{2})_([a-z0-9_]+)\.py$")
 STAGING_DIR = re.compile(r"^(\d{2})-([a-z0-9][a-z0-9_-]*)$")
-HARNESS_FIXED = ["ltb", "AGENTS.md", ".gemini/settings.json"]
+HARNESS_FIXED = ["ltb", "AGENTS.md"]
 FAILURE_DETAILS = 3
+HIDDEN_HEADER = "LTB-HIDDEN 1"
+DIALS = ("language", "domain", "design")
+DRILL_GAPS = (1, 3, 7, 21)
+DRILL_MINUTES = 15
+MODES = ("solo", "pair", "lead")
 
 
 class UsageError(Exception):
@@ -82,12 +91,20 @@ class Config:
         self.language = parser.get("project", "language", fallback="?")
         self.build = parser.get("commands", "build", fallback="").strip()
         self.run = parser.get("commands", "run", fallback="").strip()
+        self.unit = parser.get("commands", "unit", fallback="").strip()
         if not self.run:
             raise UsageError("%s: [commands] run is empty" % self.path)
         try:
             self.timeout = float(parser.get("commands", "timeout", fallback="10"))
         except ValueError:
             raise UsageError("%s: [commands] timeout must be a number" % self.path)
+        self.assist_default = parser.get("assist", "default", fallback="solo")
+        self.assist = {}
+        if parser.has_section("assist"):
+            for key, value in parser.items("assist"):
+                if re.fullmatch(r"\d{2}", key):
+                    self.assist[key] = value.strip()
+        self.pair_paths = parser.get("assist", "pair_paths", fallback="").split()
         self.dials = {}
         if parser.has_section("dials"):
             for key, value in parser.items("dials"):
@@ -286,16 +303,17 @@ def make_helpers(ctx):
 
 
 class StageFile:
-    def __init__(self, number, slug, path, source, label):
+    def __init__(self, number, slug, path, source, label, hidden=False):
         self.number = number
         self.slug = slug
         self.path = path
         self.source = source
         self.label = label
+        self.hidden = hidden
 
 
 def discover(root, staging=False):
-    """Released Stage files (tests/stage_NN_slug.py), plus staged ones if asked. Keyed by NN."""
+    """Released public Stage files (tests/stage_NN_slug.py), plus staged ones if asked. Keyed by NN."""
     stages = {}
     tests_dir = Path(root) / "tests"
     if tests_dir.is_dir():
@@ -309,6 +327,19 @@ def discover(root, staging=False):
             if public.is_file():
                 stages[number] = StageFile(number, slug.replace("-", "_"), public, public.read_text(), str(public.relative_to(root)))
     return dict(sorted(stages.items()))
+
+
+def discover_hidden(root, staging=False):
+    """Hidden Stage files, decoded in memory from .ltb/hidden.bin, plus staged hidden.py if asked."""
+    hidden = {}
+    for number, entry in read_hidden(root).items():
+        hidden[number] = StageFile(number, entry.get("slug", ""), None, entry["source"], "<hidden stage %s>" % number, hidden=True)
+    if staging:
+        for number, slug, d in staged_dirs(root):
+            path = d / "hidden.py"
+            if path.is_file():
+                hidden[number] = StageFile(number, slug.replace("-", "_"), path, path.read_text(), "<hidden stage %s>" % number, hidden=True)
+    return dict(sorted(hidden.items()))
 
 
 def staged_dirs(root):
@@ -359,32 +390,111 @@ def lint_stage_source(source, label):
     return problems
 
 
+# ---------------------------------------------------------------- hidden tests
+
+
+def encode_hidden(stages):
+    """Deterministic text encoding of {NN: {"slug", "source"}}: not secret, just not readable by accident."""
+    payload = json.dumps({"stages": stages}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    body = base64.b64encode(zlib.compress(payload, 9)).decode("ascii")
+    return HIDDEN_HEADER + "\n" + "\n".join(body[i:i + 76] for i in range(0, len(body), 76)) + "\n"
+
+
+def decode_hidden(text):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != HIDDEN_HEADER:
+        raise UsageError(".ltb/hidden.bin has an unknown format")
+    payload = zlib.decompress(base64.b64decode("".join(lines[1:])))
+    return json.loads(payload.decode("utf-8"))["stages"]
+
+
+def read_hidden(root):
+    path = Path(root) / ".ltb" / "hidden.bin"
+    return decode_hidden(path.read_text()) if path.is_file() else {}
+
+
+# ---------------------------------------------------------------- concept checks
+
+
+def normalize_answer(kind, answer):
+    text = unicodedata.normalize("NFC", str(answer)).strip()
+    if kind == "choice":
+        return text.rstrip(").").strip().lower()[:1]
+    if kind == "number":
+        try:
+            value = decimal.Decimal(text)
+        except decimal.InvalidOperation:
+            return text
+        return format(value.normalize(), "f") if value == value.to_integral() else str(value.normalize())
+    return " ".join(text.split())
+
+
+def hash_answer(salt, kind, answer):
+    return hashlib.sha256((salt + ":" + normalize_answer(kind, answer)).encode("utf-8")).hexdigest()
+
+
+def seal_check(source):
+    """Turn a staged check.src.json (plaintext answers) into check.json (salted hashes)."""
+    questions = []
+    for i, q in enumerate(source.get("questions", []), 1):
+        kind = q.get("kind", "text")
+        if kind not in ("choice", "text", "number"):
+            raise UsageError("Concept check question %d: kind must be choice, text or number" % i)
+        if not q.get("prompt") or not q.get("answers"):
+            raise UsageError("Concept check question %d needs a prompt and answers" % i)
+        salt = os.urandom(8).hex()
+        sealed = {
+            "id": q.get("id") or "q%d" % i, "kind": kind, "prompt": q["prompt"], "salt": salt,
+            "answers": sorted({hash_answer(salt, kind, a) for a in q["answers"]}),
+            "on_miss": q.get("on_miss", "the Primer"),
+        }
+        if q.get("choices"):
+            sealed["choices"] = q["choices"]
+        questions.append(sealed)
+    if not 1 <= len(questions) <= 3:
+        raise UsageError("a Concept check has 1 to 3 questions")
+    return {"format": 1, "questions": questions}
+
+
+def check_file(root, number):
+    found = sorted((Path(root) / ".ltb" / "stages").glob("%s-*/check.json" % number))
+    return found[0] if found else None
+
+
+def check_attempted(root, number):
+    return any(e.get("stage") == number for e in read_jsonl(Path(root) / ".ltb" / "log" / "checks.jsonl"))
+
+
 # ---------------------------------------------------------------- running
 
 
 class Outcome:
-    def __init__(self, stage, name, description, status, message="", call=None):
+    def __init__(self, stage, name, description, status, message="", call=None, hidden=False):
         self.stage = stage
         self.name = name
         self.description = description
         self.status = status  # pass | fail | timeout | error
         self.message = message
         self.call = call
+        self.hidden = hidden
 
 
-def run_test(stage, name, fn, ctx):
+HIDDEN_CATEGORY = {"fail": "wrong result", "timeout": "timed out", "error": "crashed or errored"}
+
+
+def run_test(stage, name, fn, ctx, hidden=False):
     description = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else "(no description)"
     ctx.last_call = None
     try:
         fn()
-        return Outcome(stage, name, description, "pass")
+        return Outcome(stage, name, description, "pass", hidden=hidden)
     except AssertionError as exc:
-        return Outcome(stage, name, description, "fail", str(exc) or "assertion failed", ctx.last_call)
+        return Outcome(stage, name, description, "fail", str(exc) or "assertion failed", ctx.last_call, hidden)
     except TestTimeout as exc:
-        return Outcome(stage, name, description, "timeout", str(exc), ctx.last_call)
+        return Outcome(stage, name, description, "timeout", str(exc), ctx.last_call, hidden)
     except Exception:
         tb = traceback.format_exc(limit=-3)
-        return Outcome(stage, name, description, "error", tb, ctx.last_call)
+        return Outcome(stage, name, description, "error", tb, ctx.last_call, hidden)
     finally:
         ctx.cleanup()
         ctx.tmpdirs, ctx.servers = [], []
@@ -409,6 +519,32 @@ def select(stages, only=None, upto=None):
     return stages
 
 
+def execute(config, stages, hidden, k=None):
+    """Run public then Hidden tests for each selected Stage. Returns [Outcome]."""
+    ctx = Context(config)
+    helpers = make_helpers(ctx)
+    results = []
+    for number, stage in stages.items():
+        files = [stage] + ([hidden[number]] if number in hidden else [])
+        for f in files:
+            try:
+                tests = collect_tests(f.source, f.label, helpers)
+            except Exception:
+                results.append(Outcome(number, "<load>", "Stage file failed to load", "error",
+                                       "" if f.hidden else traceback.format_exc(limit=-2), hidden=f.hidden))
+                continue
+            for name, fn in tests:
+                if k and k not in name:
+                    continue
+                results.append(run_test(number, name, fn, ctx, hidden=f.hidden))
+    if config.unit:
+        proc = subprocess.run(config.unit, shell=True, cwd=str(config.cwd), capture_output=True, text=True)
+        status = "pass" if proc.returncode == 0 else "fail"
+        tail = "\n".join((proc.stdout + proc.stderr).rstrip().splitlines()[-20:])
+        results.append(Outcome("unit", config.unit, "Skeleton unit tests (%s)" % config.unit, status, tail))
+    return results
+
+
 def format_call(call):
     if not call:
         return ""
@@ -428,7 +564,8 @@ def format_call(call):
 def report(results, stages, verbose, previous=None):
     """Print one line per Stage, then details of the first failures.
 
-    A Stage is a regression when the previous run had it fully passing.
+    A Stage is a regression when the previous run had it fully passing. Hidden
+    test failures show only their description and a category, never inputs.
     """
     by_stage = {}
     for o in results:
@@ -438,13 +575,21 @@ def report(results, stages, verbose, previous=None):
         passed = sum(o.status == "pass" for o in outcomes)
         mark = "ok" if passed == len(outcomes) else "FAIL"
         note = "  <- regression (was green)" if mark == "FAIL" and number in was_green else ""
-        print("Stage %s %-28s %d/%d %s%s" % (number, stages[number].slug, passed, len(outcomes), mark, note))
+        hidden = sum(o.hidden for o in outcomes)
+        extra = " (%d hidden)" % hidden if hidden else ""
+        slug = stages[number].slug if number in stages else number
+        label = "Stage %s" % number if number in stages else "      "
+        print("%s %-28s %d/%d%s %s%s" % (label, slug, passed, len(outcomes), extra, mark, note))
         if verbose:
             for o in outcomes:
-                print("    %-7s %s" % (o.status, o.description))
+                print("    %-7s %s%s" % (o.status, "[hidden] " if o.hidden else "", o.description))
     failures = [o for o in results if o.status != "pass"]
     shown = failures if verbose else failures[:FAILURE_DETAILS]
     for o in shown:
+        if o.hidden:
+            print("\n--- Stage %s: [hidden] %s (%s)" % (o.stage, o.description, HIDDEN_CATEGORY.get(o.status, o.status)))
+            print("    Hidden test: only its description is shown. Re-read the Primer's contract for this case.")
+            continue
         print("\n--- Stage %s: %s (%s)" % (o.stage, o.description, o.status))
         print("    test:  %s" % o.name)
         call = format_call(o.call)
@@ -456,27 +601,36 @@ def report(results, stages, verbose, previous=None):
         print("\n(%d more failing; run with -v to see all)" % (len(failures) - len(shown)))
 
 
-def log_run(root, results, built):
+def stage_counts(results):
     counts = {}
     for o in results:
         c = counts.setdefault(o.stage, [0, 0])
         c[0] += o.status == "pass"
         c[1] += 1
-    path = Path(root) / ".ltb" / "log" / "runs.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
-        f.write(json.dumps({"ts": timestamp(), "build": "ok" if built else "failed", "stages": counts}) + "\n")
+    return counts
+
+
+def log_run(root, results, built):
+    append_jsonl(Path(root) / ".ltb" / "log" / "runs.jsonl",
+                 {"ts": timestamp(), "build": "ok" if built else "failed", "stages": stage_counts(results)})
 
 
 def cmd_test(root, args):
     verify_or_raise(root)
-    project_config = Path(root) / ".ltb" / "config"
-    config = Config(args.config or project_config)
+    config = Config(args.config or Path(root) / ".ltb" / "config")
     stages = select(discover(root, staging=args.staging), args.stage, args.upto)
+    hidden = discover_hidden(root, staging=args.staging)
     log_this = not args.config and not args.staging
     if not stages:
         print("No Stages released yet. Ask your agent for the next Stage (learn-to-build next).")
         return OK
+    if log_this:
+        locked = [n for n in stages if check_file(root, n) and not check_attempted(root, n)]
+        for n in locked:
+            print("Stage %s is locked until you answer its Concept check: ./ltb check %s" % (n, n))
+            del stages[n]
+        if not stages:
+            return FAILED
     ok, output = build(config)
     if not ok:
         print("Build failed: %s" % config.build)
@@ -484,25 +638,164 @@ def cmd_test(root, args):
         if log_this:
             log_run(root, [], False)
         return BUILD_FAILED
-    ctx = Context(config)
-    helpers = make_helpers(ctx)
-    results = []
-    for number, stage in stages.items():
-        try:
-            tests = collect_tests(stage.source, stage.label, helpers)
-        except Exception:
-            results.append(Outcome(number, "<load>", "Stage file failed to load", "error", traceback.format_exc(limit=-2)))
-            continue
-        for name, fn in tests:
-            if args.k and args.k not in name:
-                continue
-            results.append(run_test(number, name, fn, ctx))
+    results = execute(config, stages, hidden, args.k)
     report(results, stages, args.verbose, last_run(root) if log_this else None)
     if log_this:
         log_run(root, results, True)
     failing = sum(o.status != "pass" for o in results)
     print("\n%s: %d passed, %d failing" % ("green" if not failing else "red", len(results) - failing, failing))
+    drill = active_drill(root)
+    if drill and log_this:
+        print(drill_clock(drill))
     return OK if not failing else FAILED
+
+
+# ---------------------------------------------------------------- logs
+
+
+def append_jsonl(path, entry):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def read_jsonl(path):
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def last_run(root):
+    runs = read_jsonl(Path(root) / ".ltb" / "log" / "runs.jsonl")
+    return runs[-1] if runs else None
+
+
+def stage_summary(root, number):
+    """Runs and minutes from the first run to the first green run of one Stage."""
+    runs = [r for r in read_jsonl(Path(root) / ".ltb" / "log" / "runs.jsonl") if number in r.get("stages", {})]
+    summary = {"stage": number, "runs": len(runs), "minutes_to_green": None}
+    if runs:
+        first = datetime.datetime.fromisoformat(runs[0]["ts"])
+        for r in runs:
+            passed, total = r["stages"][number]
+            if total and passed == total:
+                summary["minutes_to_green"] = round((datetime.datetime.fromisoformat(r["ts"]) - first).total_seconds() / 60)
+                break
+    return summary
+
+
+def cmd_log(root, args):
+    log_dir = Path(root) / ".ltb" / "log"
+    if args.kind == "hint":
+        if not (args.stage and args.rung):
+            raise UsageError("log hint needs --stage and --rung")
+        rung = int(args.rung)
+        if not 1 <= rung <= 5:
+            raise UsageError("--rung is 1 to 5")
+        append_jsonl(log_dir / "hints.jsonl", {"ts": timestamp(), "stage": args.stage.zfill(2), "test": args.test or "",
+                                                "rung": rung, "note": args.note or ""})
+        print("Logged hint rung %d for Stage %s." % (rung, args.stage.zfill(2)))
+    elif args.kind == "assist":
+        if not (args.stage and args.paths):
+            raise UsageError("log assist needs --stage and --paths")
+        append_jsonl(log_dir / "assist.jsonl", {"ts": timestamp(), "event": "edit", "stage": args.stage.zfill(2),
+                                                 "paths": args.paths, "note": args.note or ""})
+        print("Logged agent-written code for Stage %s." % args.stage.zfill(2))
+    elif args.kind == "summary":
+        if not args.stage:
+            raise UsageError("log summary needs --stage")
+        entry = dict(stage_summary(root, args.stage.zfill(2)), ts=timestamp(), kind="summary",
+                     mode=mode_for(Config(Path(root) / ".ltb" / "config"), args.stage.zfill(2)))
+        append_jsonl(log_dir / "dials.jsonl", entry)
+        print("Stage %s: %d runs, %s minutes from first run to green." % (
+            entry["stage"], entry["runs"], "?" if entry["minutes_to_green"] is None else entry["minutes_to_green"]))
+    return OK
+
+
+def cmd_dial(root, args):
+    if args.name not in DIALS:
+        raise UsageError("dial must be one of %s" % ", ".join(DIALS))
+    value = int(args.value)
+    if not 1 <= value <= 5:
+        raise UsageError("dial values run from 1 to 5")
+    path = Path(root) / ".ltb" / "config"
+    text = path.read_text()
+    current = Config(path).dials.get(args.name)
+    pattern = re.compile(r"^(%s\s*=\s*)\S+" % args.name, re.M)
+    section = text.find("[dials]")
+    if section < 0:
+        text = text.rstrip("\n") + "\n\n[dials]\n%s = %d\n" % (args.name, value)
+    elif pattern.search(text, section):
+        m = pattern.search(text, section)
+        text = text[:m.start()] + m.group(1) + str(value) + text[m.end():]
+    else:
+        insert = text.index("\n", section) + 1
+        text = text[:insert] + "%s = %d\n" % (args.name, value) + text[insert:]
+    path.write_text(text)
+    append_jsonl(Path(root) / ".ltb" / "log" / "dials.jsonl", {
+        "ts": timestamp(), "dial": args.name, "from": int(current) if current else None, "to": value,
+        "evidence": args.evidence or "",
+    })
+    print("Dial %s: %s -> %d" % (args.name, current or "unset", value))
+    return OK
+
+
+# ---------------------------------------------------------------- assistance
+
+
+def mode_for(config, number):
+    return config.assist.get(number, config.assist_default)
+
+
+def current_stage(root):
+    stages = discover(root)
+    return list(stages)[-1] if stages else None
+
+
+def set_ini_value(text, section, key, value):
+    """Set key = value in [section] of an INI text, keeping everything else as written."""
+    header = re.search(r"^\[%s\]\s*$" % re.escape(section), text, re.M)
+    if not header:
+        return text.rstrip("\n") + "\n\n[%s]\n%s = %s\n" % (section, key, value)
+    nxt = re.search(r"^\[", text[header.end():], re.M)
+    end = header.end() + nxt.start() if nxt else len(text)
+    body = text[header.end():end]
+    line = re.compile(r"^%s\s*=.*$" % re.escape(key), re.M)
+    if line.search(body):
+        body = line.sub("%s = %s" % (key, value), body, count=1)
+    else:
+        body = body.rstrip("\n") + "\n%s = %s\n" % (key, value)
+        if nxt:
+            body += "\n"
+    return text[:header.end()] + body + text[end:]
+
+
+def cmd_assist(root, args):
+    path = Path(root) / ".ltb" / "config"
+    config = Config(path)
+    if not args.mode:
+        number = current_stage(root)
+        print("Default: %s" % config.assist_default)
+        for n, m in sorted(config.assist.items()):
+            print("Stage %s: %s" % (n, m))
+        if config.pair_paths:
+            print("Pair paths: %s" % " ".join(config.pair_paths))
+        if number:
+            print("Current Stage %s: %s" % (number, mode_for(config, number)))
+        return OK
+    if args.mode not in MODES:
+        raise UsageError("mode must be one of %s" % ", ".join(MODES))
+    key = "default" if args.default else (args.stage or current_stage(root) or "").zfill(2)
+    if key == "00":
+        raise UsageError("no Stage released yet; use --default")
+    text = set_ini_value(path.read_text(), "assist", key, args.mode)
+    if args.paths is not None:
+        text = set_ini_value(text, "assist", "pair_paths", " ".join(args.paths))
+    path.write_text(text)
+    append_jsonl(Path(root) / ".ltb" / "log" / "assist.jsonl",
+                 {"ts": timestamp(), "event": "mode", "stage": key, "mode": args.mode, "paths": args.paths or []})
+    print("Assistance mode for %s: %s" % ("the Project" if key == "default" else "Stage " + key, args.mode))
+    return OK
 
 
 # ---------------------------------------------------------------- checksums
@@ -597,6 +890,8 @@ def cmd_verify(root, args):
 
 # ---------------------------------------------------------------- seal
 
+STAGED_FILES = {"public.py", "primer.md", "hidden.py", "check.src.json", "skeleton.md"}
+
 
 def seal(root, allow_changed=()):
     """Release staged Stages and re-record checksums. Returns a summary dict."""
@@ -606,41 +901,57 @@ def seal(root, allow_changed=()):
         blocking = [(rel, kind) for rel, kind in harness_problems(root) if rel not in allow]
         if blocking:
             raise HarnessChanged(describe_problems(blocking))
-    released = []
     problems = []
     plans = []
+    released_numbers = {m.group(1) for m in (STAGE_FILE.match(p.name) for p in (root / "tests").glob("stage_*.py")) if m}
     for number, slug, d in staged_dirs(root):
         files = {p.name for p in d.iterdir()}
-        unknown = files - {"public.py", "primer.md"}
+        unknown = files - STAGED_FILES
         if unknown:
             problems.append("%s: unsupported staged files: %s" % (d.name, ", ".join(sorted(unknown))))
         if "public.py" not in files or "primer.md" not in files:
             problems.append("%s: needs public.py and primer.md" % d.name)
             continue
-        target = root / "tests" / ("stage_%s_%s.py" % (number, slug.replace("-", "_")))
-        if any(STAGE_FILE.match(p.name) and p.name.startswith("stage_%s_" % number) for p in (root / "tests").glob("stage_*.py")):
+        if number in released_numbers:
             problems.append("%s: Stage %s is already released" % (d.name, number))
         problems += lint_stage_source((d / "public.py").read_text(), "%s/public.py" % d.name)
-        plans.append((number, slug, d, target))
+        if "hidden.py" in files:
+            problems += lint_stage_source((d / "hidden.py").read_text(), "%s/hidden.py" % d.name)
+        check = None
+        if "check.src.json" in files:
+            try:
+                check = seal_check(json.loads((d / "check.src.json").read_text()))
+            except (ValueError, UsageError) as exc:
+                problems.append("%s/check.src.json: %s" % (d.name, exc))
+        plans.append((number, slug, d, check))
     for rel in allow:
         if STAGE_FILE.match(Path(rel).name) and (root / rel).is_file():
             problems += lint_stage_source((root / rel).read_text(), rel)
     if problems:
         raise UsageError("cannot seal:\n  " + "\n  ".join(problems))
-    for number, slug, d, target in plans:
-        target.parent.mkdir(exist_ok=True)
-        shutil.move(str(d / "public.py"), str(target))
+    released = []
+    hidden = read_hidden(root)
+    for number, slug, d, check in plans:
+        (root / "tests").mkdir(exist_ok=True)
+        shutil.move(str(d / "public.py"), str(root / "tests" / ("stage_%s_%s.py" % (number, slug.replace("-", "_")))))
         stage_dir = root / ".ltb" / "stages" / ("%s-%s" % (number, slug))
         stage_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(d / "primer.md"), str(stage_dir / "primer.md"))
+        for name in ("primer.md", "skeleton.md"):
+            if (d / name).is_file():
+                shutil.move(str(d / name), str(stage_dir / name))
+        if (d / "hidden.py").is_file():
+            hidden[number] = {"slug": slug.replace("-", "_"), "source": (d / "hidden.py").read_text()}
+            (d / "hidden.py").unlink()
+        if check is not None:
+            (stage_dir / "check.json").write_text(json.dumps(check, indent=1, sort_keys=True) + "\n")
+            (d / "check.src.json").unlink()
         d.rmdir()
         released.append(number)
+    if hidden:
+        (root / ".ltb" / "hidden.bin").write_text(encode_hidden(hidden))
     lines = write_checksums(root)
     entry = {"ts": timestamp(), "stages": released, "allow_changed": sorted(allow), "files": len(lines)}
-    log = root / ".ltb" / "log" / "seals.jsonl"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+    append_jsonl(root / ".ltb" / "log" / "seals.jsonl", entry)
     return entry
 
 
@@ -653,15 +964,234 @@ def cmd_seal(root, args):
     return OK
 
 
-# ---------------------------------------------------------------- status
+# ---------------------------------------------------------------- check
 
 
-def last_run(root):
-    path = Path(root) / ".ltb" / "log" / "runs.jsonl"
-    if not path.is_file():
+def cmd_check(root, args):
+    root = Path(root)
+    number = args.stage.zfill(2) if args.stage else None
+    if number is None:
+        numbers = sorted(p.parent.name[:2] for p in (root / ".ltb" / "stages").glob("*/check.json"))
+        if not numbers:
+            raise UsageError("no Concept checks released")
+        number = numbers[-1]
+    path = check_file(root, number)
+    if not path:
+        raise UsageError("Stage %s has no Concept check" % number)
+    questions = json.loads(path.read_text())["questions"]
+    if args.question:
+        questions = [q for q in questions if q["id"] == args.question]
+        if not questions:
+            raise UsageError("no question %s in Stage %s" % (args.question, number))
+    print("Concept check, Stage %s: predict, then see. A miss only points you back to the Primer.\n" % number)
+    right = 0
+    for q in questions:
+        print("[%s] %s" % (q["id"], q["prompt"]))
+        for choice in q.get("choices", []):
+            print("    " + choice)
+        if args.answer is not None:
+            answer = args.answer
+            print("> %s" % answer)
+        else:
+            try:
+                answer = input("> ")
+            except EOFError:
+                raise UsageError("no answer given; pass --question ID --answer TEXT")
+        correct = hash_answer(q["salt"], q["kind"], answer) in q["answers"]
+        right += correct
+        append_jsonl(root / ".ltb" / "log" / "checks.jsonl",
+                     {"ts": timestamp(), "stage": number, "q": q["id"], "answer": answer, "correct": correct})
+        print("    correct\n" if correct else "    not quite: revisit %s\n" % q["on_miss"])
+    print("%d/%d correct. Stage %s's tests are unlocked." % (right, len(questions), number))
+    return OK
+
+
+# ---------------------------------------------------------------- drills
+
+
+def drills_path(root):
+    return Path(root) / ".ltb" / "log" / "drills.json"
+
+
+def read_drills(root):
+    path = drills_path(root)
+    if path.is_file():
+        return json.loads(path.read_text())
+    return {"format": 1, "gaps": list(DRILL_GAPS), "drills": []}
+
+
+def write_drills(root, data):
+    path = drills_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+
+
+def drill_ratio(drill, gaps, at):
+    """How overdue a Drill is relative to its gap: >= 1 means ready."""
+    elapsed = (at - datetime.datetime.fromisoformat(drill["anchor"])).total_seconds() / 86400
+    return elapsed / gaps[drill["gap_index"]]
+
+
+def pick_drill(data, at):
+    """The ready Drill most overdue relative to its gap; ties go to the older anchor."""
+    ready = [d for d in data["drills"] if drill_ratio(d, data["gaps"], at) >= 1]
+    if not ready:
         return None
-    lines = [l for l in path.read_text().splitlines() if l.strip()]
-    return json.loads(lines[-1]) if lines else None
+    return sorted(ready, key=lambda d: (-drill_ratio(d, data["gaps"], at), d["anchor"]))[0]
+
+
+def advance(drill, passed, gaps, at):
+    drill["gap_index"] = min(drill["gap_index"] + 1, len(gaps) - 1) if passed else 0
+    drill["anchor"] = at.isoformat()
+
+
+def ready_at(drill, gaps):
+    return datetime.datetime.fromisoformat(drill["anchor"]) + datetime.timedelta(days=gaps[drill["gap_index"]])
+
+
+def active_path(root):
+    return Path(root) / ".ltb" / "drill-active.json"
+
+
+def active_drill(root):
+    path = active_path(root)
+    return json.loads(path.read_text()) if path.is_file() else None
+
+
+def drill_clock(state):
+    elapsed = (now() - datetime.datetime.fromisoformat(state["started"])).total_seconds()
+    left = DRILL_MINUTES * 60 - elapsed
+    if left <= 0:
+        return "Drill %s: time is up; run ./ltb drill finish." % state["concept"]
+    return "Drill %s: %d:%02d left." % (state["concept"], left // 60, left % 60)
+
+
+def git(root, *args, check=True):
+    proc = subprocess.run(["git"] + list(args), cwd=str(root), capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        raise UsageError("git %s failed: %s" % (" ".join(args), (proc.stderr or proc.stdout).strip()))
+    return proc.stdout.strip()
+
+
+def cmd_drill(root, args):
+    root = Path(root)
+    data = read_drills(root)
+    at = now()
+    action = args.action
+
+    if action == "add":
+        if not (args.concept and args.stage and args.paths):
+            raise UsageError("drill add needs --concept, --stage and --paths")
+        missing = [p for p in args.paths if not (root / p).exists()]
+        if missing:
+            raise UsageError("no such path: %s" % ", ".join(missing))
+        existing = [d for d in data["drills"] if d["concept"] == args.concept]
+        if existing:
+            existing[0].update(stage=args.stage.zfill(2), paths=list(args.paths))
+        else:
+            data["drills"].append({"concept": args.concept, "stage": args.stage.zfill(2), "paths": list(args.paths),
+                                   "gap_index": 0, "anchor": at.isoformat(), "history": []})
+        write_drills(root, data)
+        print("Drill %s scheduled; ready from %s." % (args.concept, ready_at(existing[0] if existing else data["drills"][-1], data["gaps"]).date()))
+        return OK
+
+    if action == "list":
+        if not data["drills"]:
+            print("No Drills yet. They are added as Stages are reviewed.")
+            return OK
+        top = pick_drill(data, at)
+        rows = sorted(data["drills"], key=lambda d: -drill_ratio(d, data["gaps"], at))
+        for d in rows:
+            ready = drill_ratio(d, data["gaps"], at) >= 1
+            if args.due and not ready:
+                continue
+            when = "ready" if ready else "ready %s" % ready_at(d, data["gaps"]).date()
+            mark = "*" if top is d else " "
+            print("%s %-24s Stage %s  gap %2dd  %s" % (mark, d["concept"], d["stage"], data["gaps"][d["gap_index"]], when))
+        if top:
+            print("\n* suggested: ./ltb drill start %s" % top["concept"])
+        return OK
+
+    if action == "start":
+        if active_drill(root):
+            raise UsageError("a Drill is already running; ./ltb drill finish or ./ltb drill discard")
+        drill = next((d for d in data["drills"] if d["concept"] == args.concept), None) if args.concept else pick_drill(data, at)
+        if drill is None:
+            raise UsageError("no such Drill" if args.concept else "no Drill is ready")
+        if git(root, "status", "--porcelain", "--", "."):
+            raise UsageError("commit or stash your changes first; a Drill needs a clean tree")
+        origin = git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        if origin == "HEAD":
+            raise UsageError("check out a branch first")
+        branch = "drill/" + drill["concept"]
+        git(root, "switch", "-q", "-c", branch)
+        git(root, "rm", "-rq", "--", *drill["paths"])
+        git(root, "commit", "-q", "-m", "ltb: drill %s (removed %s)" % (drill["concept"], ", ".join(drill["paths"])))
+        state = {"concept": drill["concept"], "stage": drill["stage"], "origin": origin, "branch": branch,
+                 "started": at.isoformat(), "green_at": None}
+        active_path(root).write_text(json.dumps(state) + "\n")
+        print("Drill: rebuild %s from memory (removed: %s)." % (drill["concept"], ", ".join(drill["paths"])))
+        print("You have %d minutes. No notes, no AI. Check with ./ltb drill check; end with ./ltb drill finish." % DRILL_MINUTES)
+        return OK
+
+    state = active_drill(root)
+    if state is None:
+        raise UsageError("no Drill is running; ./ltb drill list")
+
+    if action == "check":
+        green = drill_green(root, state, verbose=True)
+        if green and not state["green_at"]:
+            state["green_at"] = now().isoformat()
+            active_path(root).write_text(json.dumps(state) + "\n")
+        print(drill_clock(state))
+        return OK if green else FAILED
+
+    if action in ("finish", "discard"):
+        passed = None
+        if action == "finish":
+            if not state["green_at"] and drill_green(root, state, verbose=False):
+                state["green_at"] = now().isoformat()
+            started = datetime.datetime.fromisoformat(state["started"])
+            elapsed = ((datetime.datetime.fromisoformat(state["green_at"]) if state["green_at"] else now()) - started).total_seconds()
+            passed = bool(state["green_at"]) and elapsed <= DRILL_MINUTES * 60
+        git(root, "reset", "-q", "--hard")
+        git(root, "clean", "-fdq", "--", ".")
+        git(root, "switch", "-q", state["origin"])
+        git(root, "branch", "-q", "-D", state["branch"])
+        active_path(root).unlink()
+        if action == "discard":
+            print("Drill discarded; nothing recorded. It stays ready.")
+            return OK
+        data = read_drills(root)
+        drill = next(d for d in data["drills"] if d["concept"] == state["concept"])
+        drill["history"].append({"ts": now().isoformat(), "result": "pass" if passed else "fail", "elapsed_s": int(elapsed)})
+        advance(drill, passed, data["gaps"], now())
+        write_drills(root, data)
+        git(root, "add", "--", str(drills_path(root).relative_to(root)))
+        git(root, "commit", "-q", "-m", "ltb: drill %s %s" % (state["concept"], "pass" if passed else "fail"))
+        print("Drill %s: %s in %d:%02d. Next one ready %s." % (
+            state["concept"], "PASS" if passed else "not this time", elapsed // 60, elapsed % 60,
+            ready_at(drill, data["gaps"]).date()))
+        return OK
+
+    raise UsageError("unknown drill action %s" % action)
+
+
+def drill_green(root, state, verbose):
+    config = Config(Path(root) / ".ltb" / "config")
+    stages = select(discover(root), state["stage"])
+    ok, output = build(config)
+    if not ok:
+        print("Build failed: %s" % config.build)
+        print("\n".join(output.rstrip().splitlines()[-15:]))
+        return False
+    results = [o for o in execute(config, stages, discover_hidden(root)) if o.stage != "unit"]
+    if verbose:
+        report(results, stages, False)
+    return bool(results) and all(o.status == "pass" for o in results)
+
+
+# ---------------------------------------------------------------- status
 
 
 def cmd_status(root, args):
@@ -680,20 +1210,48 @@ def cmd_status(root, args):
     for number, stage in stages.items():
         c = counts.get(number)
         state = "%d/%d passing" % tuple(c) if c else "not run yet"
+        if check_file(root, number) and not check_attempted(root, number):
+            state += "; Concept check unanswered (./ltb check %s)" % number
         print("Stage %s %-28s %s" % (number, stage.slug, state))
     if stages:
         latest = list(stages)[-1]
-        primer = sorted((root / ".ltb" / "stages").glob("%s-*/primer.md" % latest))
-        if primer:
-            print("Primer:  %s" % primer[0].relative_to(root))
+        mode = mode_for(config, latest)
+        stage_dir = sorted((root / ".ltb" / "stages").glob("%s-*" % latest))
+        line = "Assist:  %s for Stage %s" % (mode, latest)
+        if mode == "pair" and config.pair_paths:
+            line += " (agent may write: %s)" % " ".join(config.pair_paths)
+        if mode == "lead" and stage_dir and not (stage_dir[0] / "approach.md").is_file():
+            line += "; Approach missing: write %s before the agent codes" % (stage_dir[0] / "approach.md").relative_to(root)
+        print(line)
+        if stage_dir:
+            print("Primer:  %s" % (stage_dir[0] / "primer.md").relative_to(root))
+            if (stage_dir[0] / "skeleton.md").is_file():
+                print("Skeleton: %s" % (stage_dir[0] / "skeleton.md").relative_to(root))
     open_findings = 0
     for review in sorted((root / ".ltb" / "log").glob("review-*.md")):
         open_findings += len(re.findall(r"^Status:\s*open\b", review.read_text(), re.M))
     if open_findings:
         print("Review:  %d open finding(s)" % open_findings)
+    hints = read_jsonl(root / ".ltb" / "log" / "hints.jsonl")
+    if stages and hints:
+        latest = list(stages)[-1]
+        rungs = [h["rung"] for h in hints if h.get("stage") == latest]
+        if rungs:
+            print("Hints:   Stage %s, %d given, highest rung %d" % (latest, len(rungs), max(rungs)))
     staged = staged_dirs(root)
     if staged:
         print("Staged:  %s (unreleased)" % ", ".join(d.name for _, _, d in staged))
+    drill = active_drill(root)
+    if drill:
+        print("Drill:   ACTIVE. " + drill_clock(drill))
+    else:
+        data = read_drills(root)
+        top = pick_drill(data, now())
+        if top:
+            print("Drill:   %s is ready (./ltb drill start %s)" % (top["concept"], top["concept"]))
+        elif data["drills"]:
+            soonest = min(ready_at(d, data["gaps"]) for d in data["drills"])
+            print("Drill:   next ready %s" % soonest.date())
     if run:
         print("Last run: %s" % run.get("ts"))
     return OK
@@ -703,8 +1261,9 @@ def cmd_status(root, args):
 
 
 def cmd_api(root, args):
-    print("Test files: tests/stage_NN_slug.py. Each top-level test_* function is one test;")
-    print("its docstring (required) is the description the Learner sees. Plain assert works.\n")
+    print("Test files: tests/stage_NN_slug.py (public) and hidden.py (Hidden, same format).")
+    print("Each top-level test_* function is one test; its docstring (required) is the")
+    print("description the Learner sees. Plain assert works.\n")
     print("from ltb import run, serve, expect, tmpdir\n")
     helpers = make_helpers(Context.__new__(Context))
     for name in ("run", "serve", "expect", "tmpdir"):
@@ -734,11 +1293,42 @@ def parser():
     sub.add_parser("verify", help="check the Harness is unchanged")
     s = sub.add_parser("seal", help="release staged Stages and record checksums (used by learn-to-build next)")
     s.add_argument("--allow-changed", nargs="*", metavar="PATH", help="Harness files deliberately edited by this release")
+    c = sub.add_parser("check", help="answer a Stage's Concept check")
+    c.add_argument("stage", nargs="?", help="Stage NN (default: the latest with a check)")
+    c.add_argument("--question", help="answer one question by id")
+    c.add_argument("--answer", help="the answer, for non-interactive use")
+    lg = sub.add_parser("log", help="record a hint or a Stage's run summary (used by the agent)")
+    lg.add_argument("kind", choices=["hint", "summary", "assist"])
+    lg.add_argument("--paths", nargs="+")
+    lg.add_argument("--stage")
+    lg.add_argument("--test")
+    lg.add_argument("--rung")
+    lg.add_argument("--note")
+    dl = sub.add_parser("dial", help="set a Dial and record why (used by the agent)")
+    dl.add_argument("name")
+    dl.add_argument("value")
+    dl.add_argument("--evidence")
+    dr = sub.add_parser("drill", help="spaced from-memory rebuilds of earlier Stages")
+    dr.add_argument("action", choices=["list", "add", "start", "check", "finish", "discard"])
+    dr.add_argument("concept", nargs="?")
+    dr.add_argument("--due", action="store_true", help="list only ready Drills")
+    dr.add_argument("--concept", dest="concept_opt")
+    dr.add_argument("--stage")
+    dr.add_argument("--paths", nargs="+")
+    a = sub.add_parser("assist", help="show or set the Assistance mode (solo, pair, lead)")
+    a.add_argument("mode", nargs="?")
+    target = a.add_mutually_exclusive_group()
+    target.add_argument("--stage", help="Stage NN (default: the current Stage)")
+    target.add_argument("--default", action="store_true", help="set the Project default")
+    a.add_argument("--paths", nargs="*", help="Pair mode: files or globs the agent may write")
     sub.add_parser("api", help="print the test-helper API")
     return p
 
 
-COMMANDS = {"test": cmd_test, "status": cmd_status, "verify": cmd_verify, "seal": cmd_seal, "api": cmd_api}
+COMMANDS = {
+    "test": cmd_test, "status": cmd_status, "verify": cmd_verify, "seal": cmd_seal, "api": cmd_api,
+    "check": cmd_check, "log": cmd_log, "dial": cmd_dial, "drill": cmd_drill, "assist": cmd_assist,
+}
 
 
 def main(argv=None, root=None):
@@ -746,6 +1336,8 @@ def main(argv=None, root=None):
     if not args.command:
         parser().print_help()
         return USAGE
+    if args.command == "drill":
+        args.concept = args.concept_opt or args.concept
     root = Path(root or Path(__file__).resolve().parent)
     try:
         return COMMANDS[args.command](root, args)

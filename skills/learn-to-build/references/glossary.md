@@ -111,8 +111,20 @@ _Avoid_: Help, tips
 ## Ownership
 
 **Solution code**:
-Code the Learner writes to satisfy a Stage; the agent never authors it.
+Code that satisfies a Stage. The Learner writes it, except where the Stage's Assistance mode lets the agent write some.
 _Avoid_: Implementation, answer
+
+**Assistance mode**:
+The Learner's choice of how much code the agent may write in a Stage: **Solo** (none), **Pair** (boilerplate and plumbing around the Stage's concept, on request) or **Lead** (the code, from the Learner's Approach). Set per Project, switchable per Stage. Debugging, Drills, Concept checks and Design reviews stay the Learner's in every mode.
+_Avoid_: AI level, autonomy, help setting
+
+**Approach**:
+The Learner's short written plan for a Lead Stage (decomposition, data, edge cases), written before the agent writes any code.
+_Avoid_: Prompt, spec, plan (the plan is the Project's Stage list)
+
+**Walkthrough**:
+The Learner's explanation of agent-written code, checked by the agent, before that code counts as done.
+_Avoid_: Code reading, comprehension quiz
 
 **Harness**:
 Everything the agent provides around Solution code: Stage specs, Test suites, and the starter repo.
