@@ -1,0 +1,761 @@
+#!/usr/bin/env python3
+"""ltb: the learn-to-build runner.
+
+Runs a Project's black-box Test suites against the Learner's program, guards the
+Harness with checksums, and releases new Stages. Python 3.9+, standard library only.
+
+Exit codes: 0 ok, 1 test failures, 2 Harness changed, 3 build failed, 4 config/usage error.
+"""
+import argparse
+import ast
+import configparser
+import datetime
+import difflib
+import hashlib
+import inspect
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+import types
+from pathlib import Path
+
+OK, FAILED, HARNESS_CHANGED, BUILD_FAILED, USAGE = 0, 1, 2, 3, 4
+
+STAGE_FILE = re.compile(r"^stage_(\d{2})_([a-z0-9_]+)\.py$")
+STAGING_DIR = re.compile(r"^(\d{2})-([a-z0-9][a-z0-9_-]*)$")
+HARNESS_FIXED = ["ltb", "AGENTS.md", ".gemini/settings.json"]
+FAILURE_DETAILS = 3
+
+
+class UsageError(Exception):
+    pass
+
+
+class HarnessChanged(Exception):
+    pass
+
+
+class TestTimeout(Exception):
+    pass
+
+
+# ---------------------------------------------------------------- clock
+
+
+def now():
+    """Current time, overridable with LTB_NOW (ISO 8601) for tests and drills."""
+    override = os.environ.get("LTB_NOW")
+    if override:
+        return datetime.datetime.fromisoformat(override)
+    return datetime.datetime.now().astimezone().replace(microsecond=0)
+
+
+def timestamp():
+    return now().isoformat()
+
+
+# ---------------------------------------------------------------- config
+
+
+class Config:
+    def __init__(self, path):
+        self.path = Path(path).resolve()
+        if not self.path.is_file():
+            raise UsageError("no config at %s" % self.path)
+        parser = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+        parser.read(self.path)
+        self.parser = parser
+        self.cwd = self.path.parent
+        if self.path.parent.name == ".ltb":
+            self.cwd = self.path.parent.parent
+        self.x = parser.get("project", "x", fallback="?")
+        self.goal = parser.get("project", "goal", fallback="?")
+        self.language = parser.get("project", "language", fallback="?")
+        self.build = parser.get("commands", "build", fallback="").strip()
+        self.run = parser.get("commands", "run", fallback="").strip()
+        if not self.run:
+            raise UsageError("%s: [commands] run is empty" % self.path)
+        try:
+            self.timeout = float(parser.get("commands", "timeout", fallback="10"))
+        except ValueError:
+            raise UsageError("%s: [commands] timeout must be a number" % self.path)
+        self.dials = {}
+        if parser.has_section("dials"):
+            for key, value in parser.items("dials"):
+                self.dials[key] = value
+
+
+# ---------------------------------------------------------------- program helpers (the `ltb` module tests import)
+
+
+class Result:
+    """Outcome of one run of the Learner's program."""
+
+    def __init__(self, code, stdout, stderr, elapsed):
+        self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.elapsed = elapsed
+
+    def __repr__(self):
+        return "Result(code=%r, stdout=%r, stderr=%r)" % (self.code, self.stdout, self.stderr)
+
+
+class Context:
+    """Per-test state: how to launch the program, and what it was last asked to do."""
+
+    def __init__(self, config):
+        self.config = config
+        self.last_call = None
+        self.tmpdirs = []
+        self.servers = []
+
+    def command(self, args, port=None):
+        cmd = shlex.split(self.config.run)
+        if port is not None:
+            cmd = [part.replace("{port}", str(port)) for part in cmd]
+        return cmd + [str(a) for a in args]
+
+    def cleanup(self):
+        for server in self.servers:
+            server.stop()
+        for d in self.tmpdirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+class Server:
+    """A running instance of the Learner's program, listening on a TCP port."""
+
+    def __init__(self, ctx, args, ready_timeout):
+        self.host = "127.0.0.1"
+        self.port = _free_port()
+        self._ctx = ctx
+        self._out = tempfile.TemporaryFile()
+        self._err = tempfile.TemporaryFile()
+        env = dict(os.environ, PORT=str(self.port), LTB_PORT=str(self.port))
+        cmd = ctx.command(args, port=self.port)
+        ctx.last_call = {"args": list(args), "stdin": None, "port": self.port}
+        try:
+            self.proc = subprocess.Popen(
+                cmd, cwd=str(ctx.config.cwd), env=env, stdin=subprocess.DEVNULL,
+                stdout=self._out, stderr=self._err, start_new_session=True,
+            )
+        except OSError as exc:
+            raise AssertionError("could not start %s: %s" % (cmd[0], exc))
+        ctx.servers.append(self)
+        deadline = time.monotonic() + ready_timeout
+        while True:
+            if self.proc.poll() is not None:
+                raise AssertionError(
+                    "server exited with code %s before accepting connections" % self.proc.returncode
+                )
+            try:
+                socket.create_connection((self.host, self.port), timeout=0.2).close()
+                return
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise TestTimeout("server did not accept connections on port %d within %ss" % (self.port, ready_timeout))
+                time.sleep(0.05)
+
+    def connect(self, timeout=None):
+        """Open a new TCP connection to the server."""
+        sock = socket.create_connection((self.host, self.port), timeout=timeout or self._ctx.config.timeout)
+        return sock
+
+    def request(self, data, until=b"\n", timeout=None):
+        """Send bytes on a fresh connection and read until `until` appears (or the server closes)."""
+        if isinstance(data, str):
+            data = data.encode()
+        self._ctx.last_call = {"args": None, "stdin": data, "port": self.port}
+        with self.connect(timeout) as sock:
+            sock.sendall(data)
+            buf = b""
+            try:
+                while until not in buf:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except socket.timeout:
+                raise TestTimeout("no complete reply within %ss" % (timeout or self._ctx.config.timeout))
+            return buf
+
+    def output(self):
+        """(stdout, stderr) the server has printed so far, as text."""
+        return _read_tmp(self._out), _read_tmp(self._err)
+
+    def stop(self):
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGTERM)
+                self.proc.wait(timeout=2)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.proc.wait()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+        return False
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _read_tmp(f):
+    f.seek(0)
+    return f.read().decode("utf-8", "replace")
+
+
+def make_helpers(ctx):
+    """Build the `ltb` module that test files import: run, serve, expect, tmpdir."""
+
+    def run(args=(), stdin=None, timeout=None, env=None):
+        """Run the Learner's program once with `args`, feeding `stdin` (str or bytes).
+
+        Returns Result(code, stdout, stderr, elapsed); stdout/stderr are text when
+        stdin is text or None, bytes when stdin is bytes.
+        """
+        as_text = not isinstance(stdin, bytes)
+        ctx.last_call = {"args": list(args), "stdin": stdin, "port": None}
+        full_env = dict(os.environ, **(env or {}))
+        start = time.monotonic()
+        limit = timeout or ctx.config.timeout
+        try:
+            proc = subprocess.run(
+                ctx.command(args), cwd=str(ctx.config.cwd), input=stdin if stdin is not None else ("" if as_text else b""),
+                capture_output=True, text=as_text, timeout=limit, env=full_env,
+            )
+        except subprocess.TimeoutExpired:
+            raise TestTimeout("program did not finish within %ss" % limit)
+        except OSError as exc:
+            raise AssertionError("could not start the program (%s): %s" % (ctx.config.run, exc))
+        return Result(proc.returncode, proc.stdout, proc.stderr, time.monotonic() - start)
+
+    def serve(args=(), ready_timeout=5):
+        """Start the Learner's program as a server; use as `with serve() as s:`.
+
+        The run command may contain {port}; PORT and LTB_PORT are also set. Waits
+        until the port accepts connections. The server is killed when the block exits.
+        Server has: host, port, connect(), request(data, until=b"\\n"), output().
+        """
+        return Server(ctx, args, ready_timeout)
+
+    def expect(actual, expected, label=""):
+        """Assert actual == expected, failing with a readable diff."""
+        if actual == expected:
+            return
+        head = "%s: " % label if label else ""
+        if isinstance(actual, str) and isinstance(expected, str):
+            diff = "\n".join(difflib.unified_diff(
+                expected.splitlines(), actual.splitlines(), "expected", "actual", lineterm="",
+            ))
+            raise AssertionError("%soutput differs\n%s" % (head, diff or "(whitespace differs)\nexpected %r\nactual   %r" % (expected, actual)))
+        raise AssertionError("%sexpected %r\n  actual %r" % (head, expected, actual))
+
+    def tmpdir():
+        """A fresh empty directory (pathlib.Path), deleted after the test."""
+        d = tempfile.mkdtemp(prefix="ltb-")
+        ctx.tmpdirs.append(d)
+        return Path(d)
+
+    module = types.ModuleType("ltb")
+    module.run, module.serve, module.expect, module.tmpdir = run, serve, expect, tmpdir
+    module.Result = Result
+    return module
+
+
+# ---------------------------------------------------------------- discovery
+
+
+class StageFile:
+    def __init__(self, number, slug, path, source, label):
+        self.number = number
+        self.slug = slug
+        self.path = path
+        self.source = source
+        self.label = label
+
+
+def discover(root, staging=False):
+    """Released Stage files (tests/stage_NN_slug.py), plus staged ones if asked. Keyed by NN."""
+    stages = {}
+    tests_dir = Path(root) / "tests"
+    if tests_dir.is_dir():
+        for path in sorted(tests_dir.iterdir()):
+            m = STAGE_FILE.match(path.name)
+            if m:
+                stages[m.group(1)] = StageFile(m.group(1), m.group(2), path, path.read_text(), str(path.relative_to(root)))
+    if staging:
+        for number, slug, d in staged_dirs(root):
+            public = d / "public.py"
+            if public.is_file():
+                stages[number] = StageFile(number, slug.replace("-", "_"), public, public.read_text(), str(public.relative_to(root)))
+    return dict(sorted(stages.items()))
+
+
+def staged_dirs(root):
+    base = Path(root) / ".ltb" / "staging"
+    found = []
+    if base.is_dir():
+        for d in sorted(base.iterdir()):
+            m = STAGING_DIR.match(d.name)
+            if d.is_dir() and m:
+                found.append((m.group(1), m.group(2), d))
+            elif d.is_dir():
+                raise UsageError("staging dir %s must be named NN-slug" % d.name)
+    return found
+
+
+def collect_tests(source, label, helpers):
+    """Exec a Stage file and return its test_* functions in definition order."""
+    namespace = {"__name__": "ltb_stage", "__file__": label}
+    saved = sys.modules.get("ltb")
+    sys.modules["ltb"] = helpers
+    try:
+        exec(compile(source, label, "exec"), namespace)
+    finally:
+        if saved is None:
+            sys.modules.pop("ltb", None)
+        else:
+            sys.modules["ltb"] = saved
+    return [
+        (name, fn) for name, fn in namespace.items()
+        if name.startswith("test_") and callable(fn) and getattr(fn, "__code__", None)
+        and fn.__code__.co_filename == label
+    ]
+
+
+def lint_stage_source(source, label):
+    """Problems that stop a Stage file from being released."""
+    problems = []
+    try:
+        compile(source, label, "exec")
+    except SyntaxError as exc:
+        return ["%s: syntax error: %s" % (label, exc)]
+    tests = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")]
+    if not tests:
+        problems.append("%s: no test_* functions" % label)
+    for node in tests:
+        if not ast.get_docstring(node):
+            problems.append("%s: %s has no docstring (it is the test's description)" % (label, node.name))
+    return problems
+
+
+# ---------------------------------------------------------------- running
+
+
+class Outcome:
+    def __init__(self, stage, name, description, status, message="", call=None):
+        self.stage = stage
+        self.name = name
+        self.description = description
+        self.status = status  # pass | fail | timeout | error
+        self.message = message
+        self.call = call
+
+
+def run_test(stage, name, fn, ctx):
+    description = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else "(no description)"
+    ctx.last_call = None
+    try:
+        fn()
+        return Outcome(stage, name, description, "pass")
+    except AssertionError as exc:
+        return Outcome(stage, name, description, "fail", str(exc) or "assertion failed", ctx.last_call)
+    except TestTimeout as exc:
+        return Outcome(stage, name, description, "timeout", str(exc), ctx.last_call)
+    except Exception:
+        tb = traceback.format_exc(limit=-3)
+        return Outcome(stage, name, description, "error", tb, ctx.last_call)
+    finally:
+        ctx.cleanup()
+        ctx.tmpdirs, ctx.servers = [], []
+
+
+def build(config):
+    if not config.build:
+        return True, ""
+    proc = subprocess.run(config.build, shell=True, cwd=str(config.cwd), capture_output=True, text=True)
+    return proc.returncode == 0, (proc.stdout + proc.stderr)
+
+
+def select(stages, only=None, upto=None):
+    if only:
+        only = only.zfill(2)
+        if only not in stages:
+            raise UsageError("no Stage %s" % only)
+        return {only: stages[only]}
+    if upto:
+        upto = upto.zfill(2)
+        return {k: v for k, v in stages.items() if k <= upto}
+    return stages
+
+
+def format_call(call):
+    if not call:
+        return ""
+    lines = []
+    if call.get("args"):
+        lines.append("    args:  %s" % " ".join(shlex.quote(str(a)) for a in call["args"]))
+    if call.get("stdin") not in (None, "", b""):
+        text = call["stdin"]
+        if isinstance(text, bytes):
+            text = repr(text)
+        text = text.rstrip("\n")
+        text = text if len(text) < 400 else text[:400] + "..."
+        lines.append("    input: " + text.replace("\n", "\n           "))
+    return "\n".join(lines)
+
+
+def report(results, stages, verbose, previous=None):
+    """Print one line per Stage, then details of the first failures.
+
+    A Stage is a regression when the previous run had it fully passing.
+    """
+    by_stage = {}
+    for o in results:
+        by_stage.setdefault(o.stage, []).append(o)
+    was_green = {n for n, (p, t) in ((previous or {}).get("stages") or {}).items() if p == t and t}
+    for number, outcomes in by_stage.items():
+        passed = sum(o.status == "pass" for o in outcomes)
+        mark = "ok" if passed == len(outcomes) else "FAIL"
+        note = "  <- regression (was green)" if mark == "FAIL" and number in was_green else ""
+        print("Stage %s %-28s %d/%d %s%s" % (number, stages[number].slug, passed, len(outcomes), mark, note))
+        if verbose:
+            for o in outcomes:
+                print("    %-7s %s" % (o.status, o.description))
+    failures = [o for o in results if o.status != "pass"]
+    shown = failures if verbose else failures[:FAILURE_DETAILS]
+    for o in shown:
+        print("\n--- Stage %s: %s (%s)" % (o.stage, o.description, o.status))
+        print("    test:  %s" % o.name)
+        call = format_call(o.call)
+        if call:
+            print(call)
+        for line in o.message.rstrip().splitlines():
+            print("    " + line)
+    if len(failures) > len(shown):
+        print("\n(%d more failing; run with -v to see all)" % (len(failures) - len(shown)))
+
+
+def log_run(root, results, built):
+    counts = {}
+    for o in results:
+        c = counts.setdefault(o.stage, [0, 0])
+        c[0] += o.status == "pass"
+        c[1] += 1
+    path = Path(root) / ".ltb" / "log" / "runs.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as f:
+        f.write(json.dumps({"ts": timestamp(), "build": "ok" if built else "failed", "stages": counts}) + "\n")
+
+
+def cmd_test(root, args):
+    verify_or_raise(root)
+    project_config = Path(root) / ".ltb" / "config"
+    config = Config(args.config or project_config)
+    stages = select(discover(root, staging=args.staging), args.stage, args.upto)
+    log_this = not args.config and not args.staging
+    if not stages:
+        print("No Stages released yet. Ask your agent for the next Stage (learn-to-build next).")
+        return OK
+    ok, output = build(config)
+    if not ok:
+        print("Build failed: %s" % config.build)
+        print("\n".join(output.rstrip().splitlines()[-30:]))
+        if log_this:
+            log_run(root, [], False)
+        return BUILD_FAILED
+    ctx = Context(config)
+    helpers = make_helpers(ctx)
+    results = []
+    for number, stage in stages.items():
+        try:
+            tests = collect_tests(stage.source, stage.label, helpers)
+        except Exception:
+            results.append(Outcome(number, "<load>", "Stage file failed to load", "error", traceback.format_exc(limit=-2)))
+            continue
+        for name, fn in tests:
+            if args.k and args.k not in name:
+                continue
+            results.append(run_test(number, name, fn, ctx))
+    report(results, stages, args.verbose, last_run(root) if log_this else None)
+    if log_this:
+        log_run(root, results, True)
+    failing = sum(o.status != "pass" for o in results)
+    print("\n%s: %d passed, %d failing" % ("green" if not failing else "red", len(results) - failing, failing))
+    return OK if not failing else FAILED
+
+
+# ---------------------------------------------------------------- checksums
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def harness_paths(root):
+    """Harness files the checksums cover, relative to root."""
+    root = Path(root)
+    paths = [p for p in HARNESS_FIXED if (root / p).is_file()]
+    tests_dir = root / "tests"
+    if tests_dir.is_dir():
+        paths += ["tests/" + p.name for p in sorted(tests_dir.iterdir()) if STAGE_FILE.match(p.name)]
+    if (root / ".ltb" / "hidden.bin").is_file():
+        paths.append(".ltb/hidden.bin")
+    stages_dir = root / ".ltb" / "stages"
+    if stages_dir.is_dir():
+        paths += [str(p.relative_to(root)) for p in sorted(stages_dir.glob("*/check.json"))]
+    return sorted(paths)
+
+
+def read_checksums(root):
+    path = Path(root) / ".ltb" / "checksums"
+    if not path.is_file():
+        return None
+    recorded = {}
+    for line in path.read_text().splitlines():
+        if line.strip():
+            digest, rel = line.split(None, 1)
+            recorded[rel.strip()] = digest
+    return recorded
+
+
+def write_checksums(root):
+    root = Path(root)
+    lines = ["%s  %s" % (sha256(root / rel), rel) for rel in harness_paths(root)]
+    (root / ".ltb").mkdir(exist_ok=True)
+    (root / ".ltb" / "checksums").write_text("\n".join(lines) + "\n")
+    return lines
+
+
+def harness_problems(root):
+    """[(path, problem)] where problem is changed | missing | unreleased."""
+    root = Path(root)
+    recorded = read_checksums(root)
+    if recorded is None:
+        return [(".ltb/checksums", "missing")]
+    problems = []
+    for rel, digest in sorted(recorded.items()):
+        if not (root / rel).is_file():
+            problems.append((rel, "missing"))
+        elif sha256(root / rel) != digest:
+            problems.append((rel, "changed"))
+    for rel in harness_paths(root):
+        if rel not in recorded:
+            problems.append((rel, "unreleased"))
+    return problems
+
+
+def describe_problems(problems):
+    lines = ["The Harness changed, so ltb will not grade. Harness files are written only by"
+             " `learn-to-build next`; Solution code is everything else."]
+    for rel, kind in problems:
+        lines.append("  %-10s %s" % (kind, rel))
+    restore = [rel for rel, kind in problems if kind in ("changed", "missing")]
+    extra = [rel for rel, kind in problems if kind == "unreleased"]
+    if restore:
+        lines.append("Restore with:  git checkout -- " + " ".join(shlex.quote(r) for r in restore))
+    if extra:
+        lines.append("Remove files not released by next:  rm " + " ".join(shlex.quote(r) for r in extra))
+    return "\n".join(lines)
+
+
+def verify_or_raise(root):
+    problems = harness_problems(root)
+    if problems:
+        raise HarnessChanged(describe_problems(problems))
+
+
+def cmd_verify(root, args):
+    verify_or_raise(root)
+    print("Harness ok (%d files)." % len(read_checksums(root)))
+    return OK
+
+
+# ---------------------------------------------------------------- seal
+
+
+def seal(root, allow_changed=()):
+    """Release staged Stages and re-record checksums. Returns a summary dict."""
+    root = Path(root)
+    allow = {str(Path(p)) for p in allow_changed}
+    if read_checksums(root) is not None:
+        blocking = [(rel, kind) for rel, kind in harness_problems(root) if rel not in allow]
+        if blocking:
+            raise HarnessChanged(describe_problems(blocking))
+    released = []
+    problems = []
+    plans = []
+    for number, slug, d in staged_dirs(root):
+        files = {p.name for p in d.iterdir()}
+        unknown = files - {"public.py", "primer.md"}
+        if unknown:
+            problems.append("%s: unsupported staged files: %s" % (d.name, ", ".join(sorted(unknown))))
+        if "public.py" not in files or "primer.md" not in files:
+            problems.append("%s: needs public.py and primer.md" % d.name)
+            continue
+        target = root / "tests" / ("stage_%s_%s.py" % (number, slug.replace("-", "_")))
+        if any(STAGE_FILE.match(p.name) and p.name.startswith("stage_%s_" % number) for p in (root / "tests").glob("stage_*.py")):
+            problems.append("%s: Stage %s is already released" % (d.name, number))
+        problems += lint_stage_source((d / "public.py").read_text(), "%s/public.py" % d.name)
+        plans.append((number, slug, d, target))
+    for rel in allow:
+        if STAGE_FILE.match(Path(rel).name) and (root / rel).is_file():
+            problems += lint_stage_source((root / rel).read_text(), rel)
+    if problems:
+        raise UsageError("cannot seal:\n  " + "\n  ".join(problems))
+    for number, slug, d, target in plans:
+        target.parent.mkdir(exist_ok=True)
+        shutil.move(str(d / "public.py"), str(target))
+        stage_dir = root / ".ltb" / "stages" / ("%s-%s" % (number, slug))
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(d / "primer.md"), str(stage_dir / "primer.md"))
+        d.rmdir()
+        released.append(number)
+    lines = write_checksums(root)
+    entry = {"ts": timestamp(), "stages": released, "allow_changed": sorted(allow), "files": len(lines)}
+    log = root / ".ltb" / "log" / "seals.jsonl"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return entry
+
+
+def cmd_seal(root, args):
+    entry = seal(root, args.allow_changed or ())
+    if entry["stages"]:
+        print("Released Stage(s) %s; checksums cover %d files." % (", ".join(entry["stages"]), entry["files"]))
+    else:
+        print("Checksums recorded for %d files." % entry["files"])
+    return OK
+
+
+# ---------------------------------------------------------------- status
+
+
+def last_run(root):
+    path = Path(root) / ".ltb" / "log" / "runs.jsonl"
+    if not path.is_file():
+        return None
+    lines = [l for l in path.read_text().splitlines() if l.strip()]
+    return json.loads(lines[-1]) if lines else None
+
+
+def cmd_status(root, args):
+    root = Path(root)
+    config = Config(root / ".ltb" / "config")
+    print("Project: build your own %s (%s; Goal: %s)" % (config.x, config.language, config.goal))
+    if config.dials:
+        print("Dials:   " + ", ".join("%s %s" % kv for kv in config.dials.items()))
+    problems = harness_problems(root)
+    print("Harness: " + ("ok" if not problems else "CHANGED (run ./ltb verify)"))
+    stages = discover(root)
+    run = last_run(root) or {}
+    counts = run.get("stages", {})
+    if not stages:
+        print("Stages:  none released yet")
+    for number, stage in stages.items():
+        c = counts.get(number)
+        state = "%d/%d passing" % tuple(c) if c else "not run yet"
+        print("Stage %s %-28s %s" % (number, stage.slug, state))
+    if stages:
+        latest = list(stages)[-1]
+        primer = sorted((root / ".ltb" / "stages").glob("%s-*/primer.md" % latest))
+        if primer:
+            print("Primer:  %s" % primer[0].relative_to(root))
+    open_findings = 0
+    for review in sorted((root / ".ltb" / "log").glob("review-*.md")):
+        open_findings += len(re.findall(r"^Status:\s*open\b", review.read_text(), re.M))
+    if open_findings:
+        print("Review:  %d open finding(s)" % open_findings)
+    staged = staged_dirs(root)
+    if staged:
+        print("Staged:  %s (unreleased)" % ", ".join(d.name for _, _, d in staged))
+    if run:
+        print("Last run: %s" % run.get("ts"))
+    return OK
+
+
+# ---------------------------------------------------------------- api
+
+
+def cmd_api(root, args):
+    print("Test files: tests/stage_NN_slug.py. Each top-level test_* function is one test;")
+    print("its docstring (required) is the description the Learner sees. Plain assert works.\n")
+    print("from ltb import run, serve, expect, tmpdir\n")
+    helpers = make_helpers(Context.__new__(Context))
+    for name in ("run", "serve", "expect", "tmpdir"):
+        fn = getattr(helpers, name)
+        print("%s%s" % (name, inspect.signature(fn)))
+        for line in inspect.getdoc(fn).splitlines():
+            print("    " + line)
+        print()
+    return OK
+
+
+# ---------------------------------------------------------------- cli
+
+
+def parser():
+    p = argparse.ArgumentParser(prog="ltb", description="learn-to-build Project runner")
+    sub = p.add_subparsers(dest="command")
+    t = sub.add_parser("test", help="build and run the Test suites")
+    group = t.add_mutually_exclusive_group()
+    group.add_argument("--stage", help="run only Stage NN")
+    group.add_argument("--upto", help="run Stages 1..NN")
+    t.add_argument("-k", help="only tests whose name contains this")
+    t.add_argument("-v", "--verbose", action="store_true")
+    t.add_argument("--staging", action="store_true", help="include unreleased Stages in .ltb/staging/")
+    t.add_argument("--config", help="use another config (e.g. a Reference solution's); commands run in its directory")
+    sub.add_parser("status", help="where the Project stands")
+    sub.add_parser("verify", help="check the Harness is unchanged")
+    s = sub.add_parser("seal", help="release staged Stages and record checksums (used by learn-to-build next)")
+    s.add_argument("--allow-changed", nargs="*", metavar="PATH", help="Harness files deliberately edited by this release")
+    sub.add_parser("api", help="print the test-helper API")
+    return p
+
+
+COMMANDS = {"test": cmd_test, "status": cmd_status, "verify": cmd_verify, "seal": cmd_seal, "api": cmd_api}
+
+
+def main(argv=None, root=None):
+    args = parser().parse_args(argv)
+    if not args.command:
+        parser().print_help()
+        return USAGE
+    root = Path(root or Path(__file__).resolve().parent)
+    try:
+        return COMMANDS[args.command](root, args)
+    except HarnessChanged as exc:
+        print(exc)
+        return HARNESS_CHANGED
+    except UsageError as exc:
+        print("ltb: %s" % exc)
+        return USAGE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

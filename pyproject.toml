@@ -1,0 +1,15 @@
+[project]
+name = "learn-to-build"
+version = "0.1.0"
+description = "Dev environment for the learn-to-build agent skill and its ltb runner"
+requires-python = ">=3.9"
+license = "MIT"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
