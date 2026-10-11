@@ -46,6 +46,8 @@ Ask your agent to use learn-to-build, or invoke it directly:
 | Pi | `/skill:learn-to-build new sqlite` |
 | OpenCode | "use learn-to-build to start a new sqlite project" |
 
+In Codex's default sandbox `.git` is read-only, so the agent prints the `git commit` commands for you to run.
+
 ## Repo
 
 - `skills/learn-to-build/`: the skill (`SKILL.md`, `references/`, `assets/ltb`, Project templates)
