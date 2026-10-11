@@ -27,8 +27,8 @@ Design notes, decisions and the research behind them: [docs/design.md](docs/desi
 The skill follows the [Agent Skills](https://agentskills.io/specification) format. Install it with the [skills CLI](https://skills.sh):
 
 ```sh
-npx skills add OWNER/learn-to-build -g          # all your projects; pick your agents when prompted
-npx skills add OWNER/learn-to-build -a claude-code -a codex   # this project only, for named agents
+npx skills add Tien-Cheng/learn-to-build -g          # all your projects; pick your agents when prompted
+npx skills add Tien-Cheng/learn-to-build -a claude-code -a codex   # this project only, for named agents
 ```
 
 The CLI writes to each agent's skill directory (`.claude/skills/` for Claude Code, `.agents/skills/` for Codex, Pi, OpenCode and Cursor).
