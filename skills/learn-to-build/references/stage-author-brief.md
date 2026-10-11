@@ -60,10 +60,20 @@ Unit tests in the **Learner's language**, with its standard test tool, for the p
 
 When the plan row's Kind is `pressure`, the Stage is a requirement change the real X went through, from `history.md`. The Primer opens by framing it as that real change (what happened, when, with the source). Write tests for the new behaviour; where the change alters behaviour earlier Stages tested, edit those earlier files in `tests/` directly and list them in your report. Choose the change so that well-structured code absorbs it in one place.
 
+## Self-check
+
+Before reporting, reread your files as the Learner will meet them:
+
+- **Concept check**: every question has exactly one defensible answer; for `choice`, no two options say the same thing in different words, and each wrong option is wrong for a reason the Primer explains. Each prompt contains everything needed to answer it.
+- **Tests**: every docstring is unique and names one behaviour; every expected value can be derived from the Primer alone (the Learner never sees `spec.md`).
+- **Primer**: every behaviour a public or Hidden test checks is stated in its interface contract.
+
+Fix anything that fails, then report.
+
 ## Report
 
 Return: the public test names with descriptions; how many Hidden tests and Concept-check questions you wrote (counts only, so the tutor stays unspoiled); any earlier test files you changed; any place where `spec.md` was ambiguous and how you resolved it.
 
 ## Done when
 
-`primer.md`, `public.py`, `hidden.py` and `check.src.json` exist (and `skeleton.md` when the design Dial calls for a Skeleton, with `unit/` and `unit.json` when it names a pure boundary); every behaviour in the Primer's interface contract has at least one public test; every test has a docstring.
+The self-check passes, and `primer.md`, `public.py`, `hidden.py` and `check.src.json` exist (and `skeleton.md` when the design Dial calls for a Skeleton, with `unit/` and `unit.json` when it names a pure boundary); every behaviour in the Primer's interface contract has at least one public test; every test has a docstring.
