@@ -57,6 +57,10 @@ class TestTimeout(Exception):
     pass
 
 
+class TestSkipped(Exception):
+    pass
+
+
 # ---------------------------------------------------------------- clock
 
 
@@ -287,6 +291,13 @@ def make_helpers(ctx):
             raise AssertionError("%soutput differs\n%s" % (head, diff or "(whitespace differs)\nexpected %r\nactual   %r" % (expected, actual)))
         raise AssertionError("%sexpected %r\n  actual %r" % (head, expected, actual))
 
+    def skip(reason):
+        """Skip this test with a reason, when the environment cannot run it (e.g. a missing oracle feature).
+
+        A skipped test does not fail the run; use it only for environment gaps, never for behaviour.
+        """
+        raise TestSkipped(reason)
+
     def tmpdir():
         """A fresh empty directory (pathlib.Path), deleted after the test."""
         d = tempfile.mkdtemp(prefix="ltb-")
@@ -294,7 +305,7 @@ def make_helpers(ctx):
         return Path(d)
 
     module = types.ModuleType("ltb")
-    module.run, module.serve, module.expect, module.tmpdir = run, serve, expect, tmpdir
+    module.run, module.serve, module.expect, module.tmpdir, module.skip = run, serve, expect, tmpdir, skip
     module.Result = Result
     return module
 
@@ -473,7 +484,7 @@ class Outcome:
         self.stage = stage
         self.name = name
         self.description = description
-        self.status = status  # pass | fail | timeout | error
+        self.status = status  # pass | fail | timeout | error | skip
         self.message = message
         self.call = call
         self.hidden = hidden
@@ -492,6 +503,8 @@ def run_test(stage, name, fn, ctx, hidden=False):
         return Outcome(stage, name, description, "fail", str(exc) or "assertion failed", ctx.last_call, hidden)
     except TestTimeout as exc:
         return Outcome(stage, name, description, "timeout", str(exc), ctx.last_call, hidden)
+    except TestSkipped as exc:
+        return Outcome(stage, name, description, "skip", str(exc), hidden=hidden)
     except Exception:
         tb = traceback.format_exc(limit=-3)
         return Outcome(stage, name, description, "error", tb, ctx.last_call, hidden)
@@ -572,7 +585,7 @@ def report(results, stages, verbose, previous=None):
         by_stage.setdefault(o.stage, []).append(o)
     was_green = {n for n, (p, t) in ((previous or {}).get("stages") or {}).items() if p == t and t}
     for number, outcomes in by_stage.items():
-        passed = sum(o.status == "pass" for o in outcomes)
+        passed = sum(o.status in ("pass", "skip") for o in outcomes)
         mark = "ok" if passed == len(outcomes) else "FAIL"
         note = "  <- regression (was green)" if mark == "FAIL" and number in was_green else ""
         hidden = sum(o.hidden for o in outcomes)
@@ -583,7 +596,10 @@ def report(results, stages, verbose, previous=None):
         if verbose:
             for o in outcomes:
                 print("    %-7s %s%s" % (o.status, "[hidden] " if o.hidden else "", o.description))
-    failures = [o for o in results if o.status != "pass"]
+    for o in results:
+        if o.status == "skip":
+            print("skipped: Stage %s: %s (%s)" % (o.stage, o.description, o.message))
+    failures = [o for o in results if o.status not in ("pass", "skip")]
     shown = failures if verbose else failures[:FAILURE_DETAILS]
     for o in shown:
         if o.hidden:
@@ -605,7 +621,7 @@ def stage_counts(results):
     counts = {}
     for o in results:
         c = counts.setdefault(o.stage, [0, 0])
-        c[0] += o.status == "pass"
+        c[0] += o.status in ("pass", "skip")
         c[1] += 1
     return counts
 
@@ -642,8 +658,10 @@ def cmd_test(root, args):
     report(results, stages, args.verbose, last_run(root) if log_this else None)
     if log_this:
         log_run(root, results, True)
-    failing = sum(o.status != "pass" for o in results)
-    print("\n%s: %d passed, %d failing" % ("green" if not failing else "red", len(results) - failing, failing))
+    failing = sum(o.status not in ("pass", "skip") for o in results)
+    skipped = sum(o.status == "skip" for o in results)
+    print("\n%s: %d passed, %d failing%s" % ("green" if not failing else "red", len(results) - failing - skipped, failing,
+                                            ", %d skipped" % skipped if skipped else ""))
     drill = active_drill(root)
     if drill and log_this:
         print(drill_clock(drill))
@@ -1188,7 +1206,7 @@ def drill_green(root, state, verbose):
     results = [o for o in execute(config, stages, discover_hidden(root)) if o.stage != "unit"]
     if verbose:
         report(results, stages, False)
-    return bool(results) and all(o.status == "pass" for o in results)
+    return bool(results) and all(o.status in ("pass", "skip") for o in results)
 
 
 # ---------------------------------------------------------------- status
@@ -1264,9 +1282,9 @@ def cmd_api(root, args):
     print("Test files: tests/stage_NN_slug.py (public) and hidden.py (Hidden, same format).")
     print("Each top-level test_* function is one test; its docstring (required) is the")
     print("description the Learner sees. Plain assert works.\n")
-    print("from ltb import run, serve, expect, tmpdir\n")
+    print("from ltb import run, serve, expect, tmpdir, skip\n")
     helpers = make_helpers(Context.__new__(Context))
-    for name in ("run", "serve", "expect", "tmpdir"):
+    for name in ("run", "serve", "expect", "tmpdir", "skip"):
         fn = getattr(helpers, name)
         print("%s%s" % (name, inspect.signature(fn)))
         for line in inspect.getdoc(fn).splitlines():

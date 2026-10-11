@@ -85,3 +85,13 @@ def test_regression_flagged_only_when_previously_green(make_project):
     code, out = project.run("test")
     assert code == 1
     assert "regression (was green)" in out
+
+
+def test_skip_does_not_fail_the_run(make_project):
+    project = make_project(stages=())
+    project.stage("01", "env", "from ltb import run, skip\n\ndef test_needs_tool():\n    '''uses an optional tool'''\n    skip('tool not installed')\n\ndef test_real():\n    '''real behaviour'''\n    assert run(stdin='get x\\n').stdout == '(nil)\\n'\n")
+    assert project.run("seal")[0] == 0
+    code, out = project.run("test")
+    assert code == 0, out
+    assert "skipped: Stage 01: uses an optional tool (tool not installed)" in out
+    assert "green: 1 passed, 0 failing, 1 skipped" in out

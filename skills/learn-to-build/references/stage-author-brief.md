@@ -23,10 +23,10 @@ Write for a capable engineer: short, concrete, no padding.
 
 A Test suite for this Stage's new behaviour; earlier Stages keep their own tests.
 
-- Get the helpers from `ltb` (`from ltb import run, serve, expect, tmpdir`); the API you were given documents them.
+- Get the helpers from `ltb` (`from ltb import run, serve, expect, tmpdir, skip`); the API you were given documents them.
 - **Black-box**: drive the Learner's program only through its external interface, via `run()` or `serve()`.
 - **One behaviour per test**, 3 to 8 tests. Each `test_*` function has a one-line docstring describing the behaviour in the Learner's terms; it is what they see when the test fails.
-- **Expected values come from `spec.md`**, or from the oracle named in `overview.md` when one exists. When a test runs the oracle, check it is installed with `shutil.which` and fail with an install instruction if not.
+- **Expected values come from `spec.md`**, or from the oracle named in `overview.md` when one exists. Oracle builds differ between machines (optional features, versions), so a test that runs the oracle first checks it is installed and can do what the test needs, and calls `skip("<why>")` when it cannot; the spec-based tests still cover the behaviour.
 - **Deterministic**: no timing races, no random data without a fixed seed, files only inside `tmpdir()`.
 - **Assert what the spec fixes**: exact output where the spec is exact, `in` or prefix checks where it allows variation.
 - Use `expect(actual, expected, label)` for readable diffs.

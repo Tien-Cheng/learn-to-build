@@ -4,7 +4,7 @@ import shutil
 import sqlite3
 import subprocess
 
-from ltb import run, expect, tmpdir
+from ltb import run, expect, tmpdir, skip
 
 LABEL = "database page size:"
 
@@ -83,10 +83,8 @@ def test_page_size_comes_from_header():
 def test_matches_sqlite3_cli():
     """The `database page size:` line is byte-for-byte the same as the real `sqlite3` CLI's for 512, 4096 and 65536."""
     sqlite3_cli = shutil.which("sqlite3")
-    assert sqlite3_cli, (
-        "the oracle `sqlite3` CLI is not on PATH; install it "
-        "(macOS: preinstalled or `brew install sqlite`; Debian/Ubuntu: `sudo apt install sqlite3`)"
-    )
+    if not sqlite3_cli:
+        skip("the oracle `sqlite3` CLI is not on PATH (macOS: preinstalled or `brew install sqlite`; Debian/Ubuntu: `sudo apt install sqlite3`)")
     d = tmpdir()
     for size in (512, 4096, 65536):
         db = make_db(d / ("oracle%d.db" % size), size)
@@ -94,7 +92,8 @@ def test_matches_sqlite3_cli():
             [sqlite3_cli, "-readonly", str(db), ".dbinfo"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10,
         )
-        assert oracle.returncode == 0, "oracle sqlite3 failed: %s" % oracle.stderr
+        if oracle.returncode != 0:
+            skip("this sqlite3 build cannot run .dbinfo (%s)" % oracle.stderr.strip())
         want = [l for l in oracle.stdout.splitlines() if l.startswith(LABEL)][0]
         line = page_size_line(run([str(db), ".dbinfo"]))
         expect(line, want, "page size line vs sqlite3 for %d-byte pages" % size)
